@@ -74,6 +74,7 @@ NAME_ENCRYPTED_AMI = 'Bracket encrypted AMI'
 
 log = None
 
+
 class EncryptorSession(object):
     __slots__ = [
         'conn',           # Boto AWS connection
@@ -396,15 +397,22 @@ def main(argv):
         required=True
     )
     encrypt_ami.add_argument(
+        '--validate-ami',
+        dest='no_validate_ami',
+        action='store_true',
+        help="Validate AMI properties (default)"
+    )
+    encrypt_ami.add_argument(
         '--no-validate-ami',
         dest='no_validate_ami',
         action='store_false',
         help="Don't validate AMI properties"
     )
     encrypt_ami.add_argument(
-        '--zone',
+        '-z',
+        '--availability-zone',
         metavar='NAME',
-        help='AWS availability zone',
+        help='AWS availability zone (e.g. us-west-2a)',
         dest='zone',
         required=True
     )
@@ -605,12 +613,12 @@ def main(argv):
                  snapshot_id)
         conn.delete_snapshot(snapshot_id)
 
+    log.info('Done.')
     if ami:
         # Print the AMI ID to stdout, in case the caller wants to process
         # the output.  Log messages go to stderr.
         print ami
 
-    log.info('Done.')
     sys.exit(exit_status)
 
 
