@@ -61,6 +61,7 @@ sshflags = " ".join([
 
 TAG_ENCRYPTOR = 'BrktEncryptor'
 TAG_ENCRYPTOR_SESSION_ID = 'BrktEncryptorSessionID'
+TAG_ENCRYPTOR_AMI = 'BrktEncryptorAMI'
 
 # Instance names.
 NAME_SNAPSHOT_CREATOR = 'Bracket root snapshot creator'
@@ -86,6 +87,7 @@ class EncryptorSession(object):
     ]
 
 session_id = None
+avatar_ami = None
 
 
 def ssh(user, external_ip, sshcommand, background=False):
@@ -172,7 +174,8 @@ def wait_for_instance(conn, instance_id, timeout=60, state='running'):
 def create_tags(conn, resource_id, name=None):
     tags = {
         TAG_ENCRYPTOR: True,
-        TAG_ENCRYPTOR_SESSION_ID: session_id
+        TAG_ENCRYPTOR_SESSION_ID: session_id,
+        TAG_ENCRYPTOR_AMI: avatar_ami
     }
     if name:
         tags['Name'] = name
@@ -433,6 +436,8 @@ def main(argv):
 
     global session_id
     session_id = uuid.uuid4().hex
+    global avatar_ami
+    avatar_ami = values.avatar_ami
 
     # Validate the region.
     regions = [str(r.name) for r in boto.vpc.regions()]
@@ -453,7 +458,7 @@ def main(argv):
             print(error, file=sys.stderr)
             exit(1)
 
-        error = validate_avatar_ami(conn, values.avatar_ami)
+        error = validate_avatar_ami(conn, avatar_ami)
         if error:
             print(error, file=sys.stderr)
             exit(1)
@@ -474,7 +479,7 @@ def main(argv):
 
     try:
         copy_instance = run_copy_instance(
-            conn, values.avatar_ami, values.key_name,
+            conn, avatar_ami, values.key_name,
             "m3.medium", snapshot_id, size, None)
 
         host_ip = copy_instance.ip_address
@@ -568,9 +573,9 @@ def main(argv):
         image = aws_call(20, 1, conn.get_image, values.ami)
         if image is None:
             raise Exception("Can't find image %s" % (values.ami,))
-        avatar_image = aws_call(20, 1, conn.get_image, values.avatar_ami)
+        avatar_image = aws_call(20, 1, conn.get_image, avatar_ami)
         if avatar_image is None:
-            raise Exception("Can't find image %s" % (values.avatar_ami,))
+            raise Exception("Can't find image %s" % (avatar_ami,))
 
         name = 'Bracket_%s_%d' % (image.name, time.time())
         if image.description:
