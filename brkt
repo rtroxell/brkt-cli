@@ -33,6 +33,8 @@ aws_access_key_id = XXXXXXXXXXXXX
 aws_secret_access_key = XXXXXXXXXXXX
 ------------
 """
+from __future__ import print_function
+
 import argparse
 import boto
 import boto.ec2
@@ -178,7 +180,7 @@ def create_tags(conn, resource_id, name=None):
     conn.create_tags([resource_id], tags)
 
 
-def run_copy_instance(conn, ami, zone, key_name,
+def run_copy_instance(conn, ami, key_name,
                       inst_type, snapshot, root_size, userdata):
     log.info('Launching encryptor instance with snapshot %s', snapshot)
 
@@ -201,11 +203,9 @@ def run_copy_instance(conn, ami, zone, key_name,
     reservation = aws_call(20, 1, conn.run_instances, ami,
                            key_name=key_name,
                            instance_type=inst_type,
-                           placement=zone,
                            ebs_optimized=False,
                            block_device_map=bdm,
-                           user_data=userdata
-                           )
+                           user_data=userdata)
     instance = reservation.instances[0]
     create_tags(conn, instance.id, name='Bracket volume encryptor')
     instance = wait_for_instance(conn, instance.id)
@@ -409,16 +409,15 @@ def main(argv):
         help="Don't validate AMI properties"
     )
     encrypt_ami.add_argument(
-        '-z',
-        '--availability-zone',
+        '--region',
         metavar='NAME',
-        help='AWS availability zone (e.g. us-west-2a)',
-        dest='zone',
+        help='AWS region (e.g. us-west-2)',
+        dest='region',
         required=True
     )
 
     values = parser.parse_args(argv)
-    region = values.zone[:-1]
+    region = values.region
 
     # Initialize logging.  Log messages are written to stderr and are
     # prefixed with a compact timestamp, so that the user knows how long
@@ -435,18 +434,28 @@ def main(argv):
     global session_id
     session_id = uuid.uuid4().hex
 
+    # Validate the region.
+    regions = [str(r.name) for r in boto.vpc.regions()]
+    if region not in regions:
+        print(
+            'Invalid region %s.  Must be one of %s.' %
+            (region, str(regions)),
+            file=sys.stderr
+        )
+        exit(1)
+
     # Open up a persistent connection
     conn = boto.vpc.connect_to_region(region)
 
     if not values.no_validate_ami:
         error = validate_guest_ami(conn, values.ami)
         if error:
-            log.error(error)
+            print(error, file=sys.stderr)
             exit(1)
 
         error = validate_avatar_ami(conn, values.avatar_ami)
         if error:
-            log.error(error)
+            print(error, file=sys.stderr)
             exit(1)
 
     log.info('Starting encryptor session %s', session_id)
@@ -465,7 +474,7 @@ def main(argv):
 
     try:
         copy_instance = run_copy_instance(
-            conn, values.avatar_ami, values.zone, values.key_name,
+            conn, values.avatar_ami, values.key_name,
             "m3.medium", snapshot_id, size, None)
 
         host_ip = copy_instance.ip_address
@@ -617,7 +626,7 @@ def main(argv):
     if ami:
         # Print the AMI ID to stdout, in case the caller wants to process
         # the output.  Log messages go to stderr.
-        print ami
+        print(ami)
 
     sys.exit(exit_status)
 
