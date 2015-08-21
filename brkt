@@ -74,6 +74,8 @@ NAME_METAVISOR_GRUB_SNAPSHOT = 'Bracket system GRUB'
 NAME_METAVISOR_LOG_SNAPSHOT = 'Bracket system log'
 NAME_ENCRYPTED_AMI = 'Bracket encrypted AMI'
 
+PLATFORM_WINDOWS = 'windows'
+
 log = None
 
 
@@ -339,10 +341,17 @@ def validate_guest_ami(conn, ami_id):
     if len(images) == 0:
         return '%s is no longer available' % ami_id
     image = images[0]
+
+    # Amazon's API only returns 'windows' or nothing.  We're not currently
+    # able to detect individual Linux distros.
+    if image.platform == PLATFORM_WINDOWS:
+        return '%s is not a supported platform for %s' % (
+            PLATFORM_WINDOWS, ami_id)
+
     if image.root_device_type != 'ebs':
         return '%s does not use EBS storage.' % ami_id
     if image.hypervisor != 'xen':
-        return '%s uses Hypervisor %s.  Only xen is supported' % (
+        return '%s uses hypervisor %s.  Only xen is supported' % (
             ami_id, image.hypervisor)
     return None
 
