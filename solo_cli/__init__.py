@@ -70,6 +70,59 @@ NAME_ENCRYPTED_AMI = 'Bracket encrypted AMI'
 log = None
 
 
+class SnapshotError(Exception):
+    def __init__(self, message):
+        super(SnapshotError, self).__init__(message)
+
+
+def _get_snapshot_progress_text(snapshots):
+    elements = [
+        '%s: %s' % (str(s.id), str(s.progress))
+        for s in snapshots
+    ]
+    return ', '.join(elements)
+
+
+def wait_for_snapshots(svc, *snapshot_ids):
+    log.debug('Waiting for status "completed" for %s', str(snapshot_ids))
+    last_progress_log = time.time()
+
+    # Give the AWS some time to propagate the snapshot creation.
+    # If we create and get immediately, AWS may return 400.  We'll fix
+    # this properly for NUC-9311.
+    time.sleep(20)
+
+    while True:
+        snapshots = svc.get_snapshots(*snapshot_ids)
+        log.debug('%s', {s.id: s.status for s in snapshots})
+
+        done = True
+        error_ids = []
+        for snapshot in snapshots:
+            if snapshot.status == 'error':
+                error_ids.append(snapshot.id)
+            if snapshot.status != 'completed':
+                done = False
+
+        if error_ids:
+            # Get rid of unicode markers in error the message.
+            error_ids = [str(id) for id in error_ids]
+            raise SnapshotError(
+                'Snapshots in error state: %s.  Cannot continue.' %
+                str(error_ids)
+            )
+        if done:
+            return
+
+        # Log progress if necessary.
+        now = time.time()
+        if now - last_progress_log > 60:
+            log.info(_get_snapshot_progress_text(snapshots))
+            last_progress_log = now
+
+        time.sleep(5)
+
+
 def run_copy_instance(svc, ami, snapshot, root_size):
     log.info('Launching encryptor instance with snapshot %s', snapshot)
 
@@ -97,7 +150,10 @@ def run_copy_instance(svc, ami, snapshot, root_size):
 
 
 def create_root_snapshot(svc, ami):
-    """ Launch the snapshotter instance.
+    """ Launch the snapshotter instance, snapshot the root volume of the given
+    AMI, and shut down the instance.
+
+    :except SnapshotError if the snapshot goes into an error state
     """
     instance = svc.run_instance(ami)
     log.info(
@@ -127,9 +183,7 @@ def create_root_snapshot(svc, ami):
         'Creating snapshot %s of root volume for instance %s',
         snapshot.id, instance.id
     )
-    while snapshot.status != 'completed':
-        time.sleep(5)
-        snapshot = svc.get_snapshot(snapshot.id)
+    wait_for_snapshots(svc, snapshot.id)
 
     # Terminate snapshotter instance.
     log.info(
@@ -137,6 +191,7 @@ def create_root_snapshot(svc, ami):
         snapshot.id, instance.id
     )
     svc.terminate_instance(instance.id, wait=False)
+
     ret_values = (
         snapshot.id, root_dev, vol.size, root_vol.volume_type, root_vol.iops)
     log.debug('Returning %s', str(ret_values))
@@ -226,7 +281,7 @@ def main():
         )
         return 1
 
-    # Open up a persistent connection
+    # Connect to AWS.
     svc = Service(session_id, avatar_ami)
     svc.connect(values.key_name, region)
 
@@ -243,18 +298,16 @@ def main():
 
     log.info('Starting encryptor session %s', session_id)
 
-    # Create a snapshot of the guest root volume.
-    snapshot_id, root_dev, size, vol_type, iops = \
-        create_root_snapshot(svc, values.ami)
-    log.debug(
-        'snapshot=%s, root_dev=%s, size=%s, vol_type=%s, iops=%s',
-        snapshot_id, root_dev, size, vol_type, iops)
-
     copy_instance = None
     exit_status = 0
     ami = None
+    snapshot_id = None
 
     try:
+        snapshot_id, root_dev, size, vol_type, iops = create_root_snapshot(
+            svc, values.ami
+        )
+
         copy_instance = run_copy_instance(svc, avatar_ami, snapshot_id, size)
 
         host_ip = copy_instance.ip_address
@@ -288,7 +341,7 @@ def main():
 
         description = 'Based on ' + values.ami
 
-        # Snapshot root volumes.
+        # Snapshot volumes.
         snap_guest = svc.create_snapshot(
             bdm['/dev/sda5'].volume_id,
             name=NAME_ENCRYPTED_ROOT_SNAPSHOT,
@@ -299,17 +352,13 @@ def main():
             name=NAME_METAVISOR_ROOT_SNAPSHOT,
             description=description
         )
-
-        # Grub and log snapshots can just be copied.
-        grub_volume = svc.get_volume(bdm['/dev/sda1'].volume_id)
-        snap_grub = svc.copy_snapshot(
-            grub_volume.snapshot_id,
+        snap_grub = svc.create_snapshot(
+            bdm['/dev/sda1'].volume_id,
             name=NAME_METAVISOR_GRUB_SNAPSHOT,
             description=description
         )
-        log_volume = svc.get_volume(bdm['/dev/sda3'].volume_id)
-        snap_log = svc.copy_snapshot(
-            log_volume.snapshot_id,
+        snap_log = svc.create_snapshot(
+            bdm['/dev/sda3'].volume_id,
             name=NAME_METAVISOR_LOG_SNAPSHOT,
             description=description
         )
@@ -318,8 +367,8 @@ def main():
             'Creating snapshots for the new encrypted AMI: %s, %s, %s, %s',
             snap_guest.id, snap_bsd.id, snap_grub.id, snap_log.id)
 
-        svc.wait_for_snapshot_status(
-            'completed', snap_guest, snap_bsd, snap_grub, snap_log)
+        wait_for_snapshots(
+            svc, snap_guest.id, snap_bsd.id, snap_grub.id, snap_log.id)
 
         # Set up new Block Device Mappings
         log.debug('Creating block device mapping')
@@ -419,5 +468,5 @@ def main():
 
 
 if __name__ == '__main__':
-    status = main()
-    sys.exit(status)
+    exit_status = main()
+    sys.exit(exit_status)

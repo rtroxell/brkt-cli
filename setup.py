@@ -13,5 +13,6 @@ setup(
         'console_scripts': [
             'brkt = solo_cli:main',
         ]
-    }
+    },
+    test_suite='test'
 )

@@ -3,7 +3,6 @@ import subprocess
 import time
 import boto
 from boto.exception import EC2ResponseError
-import sys
 
 TAG_ENCRYPTOR = 'BrktEncryptor'
 TAG_ENCRYPTOR_SESSION_ID = 'BrktEncryptorSessionID'
@@ -81,6 +80,11 @@ class Service(object):
             'Waiting for %s, timeout=%d, state=%s',
             instance_id, timeout, state)
 
+        # Give the AWS some time to propagate the instance creation.
+        # If we create and get immediately, AWS may return 400.  We'll fix
+        # this properly for NUC-9311.
+        time.sleep(10)
+
         while True:
             if (time.time() - start_timestamp) > timeout:
                 return None
@@ -89,6 +93,10 @@ class Service(object):
             log.debug('Instance %s state=%s', instance.id, instance.state)
             if instance.state == state:
                 return instance
+            if instance.state == 'error':
+                raise Exception(
+                    'Instance %s is in an error state.  Cannot proceed.'
+                )
             time.sleep(2)
 
     def run_instance(self,
@@ -144,6 +152,9 @@ class Service(object):
 
     def get_volume(self, volume_id):
         return self.conn.get_all_volumes(volume_ids=[volume_id])[0]
+
+    def get_snapshots(self, *snapshot_ids):
+        return self.conn.get_all_snapshots(snapshot_ids)
 
     def get_snapshot(self, snapshot_id):
         return self.conn.get_all_snapshots([snapshot_id])[0]
@@ -244,13 +255,3 @@ class Service(object):
 
     def delete_snapshot(self, snapshot_id):
         return self.conn.delete_snapshot(snapshot_id)
-
-    @staticmethod
-    def wait_for_snapshot_status(status, *snaps):
-        while not all(map(lambda s: s.status == status, snaps)):
-            time.sleep(10)
-            sys.stderr.write('.')
-            sys.stderr.flush()
-            for snap in snaps:
-                snap.update()
-        sys.stderr.write('\n')
