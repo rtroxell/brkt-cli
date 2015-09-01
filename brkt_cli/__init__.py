@@ -50,7 +50,7 @@ from boto.exception import EC2ResponseError
 from boto.ec2.blockdevicemapping import (BlockDeviceMapping,
         BlockDeviceType, EBSBlockDeviceType)
 
-from solo_cli.service import Service
+from brkt_cli.service import Service
 
 # End user-visible terminology.  These are resource names and descriptions
 # that the user will see in his or her EC2 console.

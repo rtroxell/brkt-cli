@@ -1,5 +1,5 @@
 from boto.ec2.snapshot import Snapshot
-import solo_cli
+import brkt_cli
 import unittest
 
 
@@ -12,7 +12,7 @@ class TestSoloCli(unittest.TestCase):
         s1.progress = u'25%'
         self.assertEqual(
             '1: 25%',
-            solo_cli._get_snapshot_progress_text([s1])
+            brkt_cli._get_snapshot_progress_text([s1])
         )
 
         # Two snapshots.
@@ -22,5 +22,5 @@ class TestSoloCli(unittest.TestCase):
 
         self.assertEqual(
             '1: 25%, 2: 50%',
-            solo_cli._get_snapshot_progress_text([s1, s2])
+            brkt_cli._get_snapshot_progress_text([s1, s2])
         )

@@ -1,10 +1,6 @@
-#!/Users/boris/venv/solo-cli/bin/python
-# EASY-INSTALL-ENTRY-SCRIPT: 'solo-cli==0.9a1','console_scripts','brkt'
-__requires__ = 'solo-cli==0.9a1'
-import sys
-from pkg_resources import load_entry_point
+#!/usr/bin/env python
+import brkt_cli
 
 if __name__ == '__main__':
-    sys.exit(
-        load_entry_point('solo-cli==0.9a1', 'console_scripts', 'brkt')()
-    )
+    exit_status = brkt_cli.main()
+    sys.exit(exit_status)
