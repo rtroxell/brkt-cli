@@ -50,22 +50,44 @@ from boto.exception import EC2ResponseError
 from boto.ec2.blockdevicemapping import (BlockDeviceMapping,
         BlockDeviceType, EBSBlockDeviceType)
 
+from solo_cli.service import Service
+
 # End user-visible terminology.  These are resource names and descriptions
 # that the user will see in his or her EC2 console.
 
-# Instance names.
-from solo_cli.service import Service
-
+# Snapshotter instance names.
 NAME_SNAPSHOT_CREATOR = 'Bracket root snapshot creator'
-NAME_ENCRYPTOR = 'Bracket image encryptor'
+DESCRIPTION_SNAPSHOT_CREATOR = \
+    'Used for creating a snapshot of the root volume from %(image_id)s'
 
-# Snapshot names.
+# Encryptor instance names.
+NAME_ENCRYPTOR = 'Bracket volume encryptor'
+DESCRIPTION_ENCRYPTOR = \
+    'Copies the root snapshot from %(image_id)s to a new encrypted volume'
+
+# Snapshots names.
 NAME_ORIGINAL_SNAPSHOT = 'Bracket encryptor original volume'
+DESCRIPTION_ORIGINAL_SNAPSHOT = \
+    'Original unencrypted root volume from %(image_id)s'
 NAME_ENCRYPTED_ROOT_SNAPSHOT = 'Bracket encrypted root volume'
 NAME_METAVISOR_ROOT_SNAPSHOT = 'Bracket system root'
 NAME_METAVISOR_GRUB_SNAPSHOT = 'Bracket system GRUB'
 NAME_METAVISOR_LOG_SNAPSHOT = 'Bracket system log'
-NAME_ENCRYPTED_AMI = 'Bracket encrypted AMI'
+DESCRIPTION_SNAPSHOT = 'Based on %(image_id)s'
+
+# Tag names.
+TAG_ENCRYPTOR = 'BrktEncryptor'
+TAG_ENCRYPTOR_SESSION_ID = 'BrktEncryptorSessionID'
+TAG_ENCRYPTOR_AMI = 'BrktEncryptorAMI'
+TAG_DESCRIPTION = 'Description'
+
+NAME_ENCRYPTED_IMAGE = '%(original_image_name)s (encrypted)'
+DESCRIPTION_ENCRYPTED_IMAGE = (
+    '%(original_image_description)s - based on %(image_id)s, '
+    'encrypted by Bracket Computing'
+)
+DEFAULT_DESCRIPTION_ENCRYPTED_IMAGE = \
+    'Based on %(image_id)s, encrypted by Bracket Computing'
 
 log = None
 
@@ -123,7 +145,8 @@ def wait_for_snapshots(svc, *snapshot_ids):
         time.sleep(5)
 
 
-def run_copy_instance(svc, ami, snapshot, root_size):
+def run_copy_instance(
+        svc, encryptor_image_id, snapshot, root_size, guest_image_id):
     log.info('Launching encryptor instance with snapshot %s', snapshot)
 
     # Use gp2 for fast burst I/O copying root drive
@@ -142,8 +165,12 @@ def run_copy_instance(svc, ami, snapshot, root_size):
     guest_encrypted_root.size = 2 * root_size + 1
     bdm['/dev/sda5'] = guest_encrypted_root
 
-    instance = svc.run_instance(ami, block_device_map=bdm)
-    svc.create_tags(instance.id, name='Bracket volume encryptor')
+    instance = svc.run_instance(encryptor_image_id, block_device_map=bdm)
+    svc.create_tags(
+        instance.id,
+        name=NAME_ENCRYPTOR,
+        description=DESCRIPTION_ENCRYPTOR % {'image_id': guest_image_id}
+    )
     instance = svc.wait_for_instance(instance.id)
     log.info('Launched encryptor instance %s', instance.id)
     return instance
@@ -159,7 +186,11 @@ def create_root_snapshot(svc, ami):
     log.info(
         'Launching instance %s to snapshot root disk for %s',
         instance.id, ami)
-    svc.create_tags(instance.id, NAME_SNAPSHOT_CREATOR)
+    svc.create_tags(
+        instance.id,
+        name=NAME_SNAPSHOT_CREATOR,
+        description=DESCRIPTION_SNAPSHOT_CREATOR % {'image_id': ami}
+    )
     instance = svc.wait_for_instance(instance.id)
 
     log.info(
@@ -177,7 +208,7 @@ def create_root_snapshot(svc, ami):
     snapshot = svc.create_snapshot(
         vol.id,
         name=NAME_ORIGINAL_SNAPSHOT,
-        description='Original unencrypted root volume from ' + ami
+        description=DESCRIPTION_ORIGINAL_SNAPSHOT % {'image_id': ami}
     )
     log.info(
         'Creating snapshot %s of root volume for instance %s',
@@ -220,7 +251,7 @@ def main():
     encrypt_ami.add_argument(
         '--encryptor-ami',
         metavar='ID',
-        dest='avatar_ami',
+        dest='encryptor_ami',
         help='Bracket Encryptor AMI',
         required=True
     )
@@ -269,7 +300,7 @@ def main():
     service.log.setLevel(log_level)
 
     session_id = uuid.uuid4().hex
-    avatar_ami = values.avatar_ami
+    encryptor_ami = values.encryptor_ami
 
     # Validate the region.
     regions = [str(r.name) for r in boto.vpc.regions()]
@@ -282,7 +313,12 @@ def main():
         return 1
 
     # Connect to AWS.
-    svc = Service(session_id, avatar_ami)
+    default_tags = {
+        TAG_ENCRYPTOR: True,
+        TAG_ENCRYPTOR_SESSION_ID: session_id,
+        TAG_ENCRYPTOR_AMI: encryptor_ami
+    }
+    svc = Service(session_id, encryptor_ami, default_tags=default_tags)
     svc.connect(values.key_name, region)
 
     if not values.no_validate_ami:
@@ -291,7 +327,7 @@ def main():
             print(error, file=sys.stderr)
             return 1
 
-        error = svc.validate_avatar_ami(avatar_ami)
+        error = svc.validate_encryptor_ami(encryptor_ami)
         if error:
             print(error, file=sys.stderr)
             return 1
@@ -307,8 +343,9 @@ def main():
         snapshot_id, root_dev, size, vol_type, iops = create_root_snapshot(
             svc, values.ami
         )
-
-        copy_instance = run_copy_instance(svc, avatar_ami, snapshot_id, size)
+        copy_instance = run_copy_instance(
+            svc, encryptor_ami, snapshot_id, size, values.ami
+        )
 
         host_ip = copy_instance.ip_address
         log.info('Waiting for ssh to %s at %s', copy_instance.id, host_ip)
@@ -339,7 +376,7 @@ def main():
         log.info('Stopping encryptor instance %s', copy_instance.id)
         svc.stop_instance(copy_instance.id)
 
-        description = 'Based on ' + values.ami
+        description = DESCRIPTION_SNAPSHOT % {'image_id': values.ami}
 
         # Snapshot volumes.
         snap_guest = svc.create_snapshot(
@@ -406,18 +443,23 @@ def main():
         image = svc.get_image(values.ami)
         if image is None:
             raise Exception("Can't find image %s" % values.ami)
-        avatar_image = svc.get_image(avatar_ami)
+        avatar_image = svc.get_image(encryptor_ami)
         if avatar_image is None:
-            raise Exception("Can't find image %s" % avatar_ami)
+            raise Exception("Can't find image %s" % encryptor_ami)
 
-        name = 'Bracket_%s_%d' % (image.name, time.time())
+        # Register the new AMI.
+        name = NAME_ENCRYPTED_IMAGE % {'original_image_name': image.name}
         if image.description:
-            description = 'Bracket: ' + image.description
+            description = DESCRIPTION_ENCRYPTED_IMAGE % {
+                'original_image_description': image.description,
+                'image_id': values.ami
+            }
         else:
-            description = name
+            description = DEFAULT_DESCRIPTION_ENCRYPTED_IMAGE % {
+                'image_id': values.ami
+            }
 
         try:
-            name = '%s based on %s' % (NAME_ENCRYPTED_AMI, values.ami)
             ami = svc.register_image(
                 name=name,
                 description=description,
@@ -425,7 +467,7 @@ def main():
                 block_device_map=new_bdm
             )
             log.info('Registered AMI %s based on the snapshots.', ami)
-            svc.create_tags(ami, name)
+            svc.create_tags(ami)
         except EC2ResponseError, e:
             # Sometimes register_image fails with an InvalidAMIID.NotFound
             # error and a message like "The image id '[ami-f9fcf3c9]' does not

@@ -4,10 +4,6 @@ import time
 import boto
 from boto.exception import EC2ResponseError
 
-TAG_ENCRYPTOR = 'BrktEncryptor'
-TAG_ENCRYPTOR_SESSION_ID = 'BrktEncryptorSessionID'
-TAG_ENCRYPTOR_AMI = 'BrktEncryptorAMI'
-
 PLATFORM_WINDOWS = 'windows'
 
 sshflags = " ".join([
@@ -28,9 +24,10 @@ def _ssh(user, external_ip, sshcommand):
 
 class Service(object):
 
-    def __init__(self, encryptor_session_id, encryptor_ami):
+    def __init__(self, encryptor_session_id, encryptor_ami, default_tags=None):
         self.session_id = encryptor_session_id
         self.encryptor_ami = encryptor_ami
+        self.default_tags = default_tags or {}
 
         # These will be initialized by connect().
         self.key_name = None
@@ -117,14 +114,12 @@ class Service(object):
             log.error('Unable to launch instance for %s', image_id)
             raise
 
-    def create_tags(self, resource_id, name=None):
-        tags = {
-            TAG_ENCRYPTOR: True,
-            TAG_ENCRYPTOR_SESSION_ID: self.session_id,
-            TAG_ENCRYPTOR_AMI: self.encryptor_ami
-        }
+    def create_tags(self, resource_id, name=None, description=None):
+        tags = dict(self.default_tags)
         if name:
             tags['Name'] = name
+        if description:
+            tags['Description'] = description
         log.debug('Tagging %s with %s', resource_id, tags)
         self.conn.create_tags([resource_id], tags)
 
@@ -195,7 +190,7 @@ class Service(object):
                 ami_id, image.hypervisor)
         return None
 
-    def validate_avatar_ami(self, ami_id):
+    def validate_encryptor_ami(self, ami_id):
         try:
             images = self.conn.get_all_images([ami_id])
         except EC2ResponseError, e:
