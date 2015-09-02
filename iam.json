@@ -1,0 +1,38 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Action": [
+                "ec2:TerminateInstances",
+                "ec2:DeleteVolume",
+                "ec2:StopInstances"
+            ],
+            "Effect": "Allow",
+            "Resource": "*",
+            "Condition": {
+                "StringEquals": {
+                    "ec2:ResourceTag/BrktEncryptor": "True"
+                }
+            }
+        },
+        {
+            "Action": [
+                "ec2:CreateTags",
+                "ec2:CreateSnapshot",
+                "ec2:RunInstances",
+                "ec2:DescribeKeyPairs",
+                "ec2:DescribeImages",
+                "ec2:DescribeInstances",
+                "ec2:DescribeInstanceAttribute",
+                "ec2:DescribeInstanceStatus",
+                "ec2:DescribeVolumes",
+                "ec2:DescribeSnapshots",
+                "ec2:RegisterImage",
+                "ec2:CopySnapshot",
+                "ec2:DeleteSnapshot"
+            ],
+            "Effect": "Allow",
+            "Resource": "*"
+        }
+    ]
+}
