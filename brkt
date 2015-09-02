@@ -3,4 +3,4 @@ import brkt_cli
 
 if __name__ == '__main__':
     exit_status = brkt_cli.main()
-    sys.exit(exit_status)
+    exit(exit_status)

@@ -81,7 +81,8 @@ TAG_ENCRYPTOR_SESSION_ID = 'BrktEncryptorSessionID'
 TAG_ENCRYPTOR_AMI = 'BrktEncryptorAMI'
 TAG_DESCRIPTION = 'Description'
 
-NAME_ENCRYPTED_IMAGE = '%(original_image_name)s (encrypted)'
+NAME_ENCRYPTED_IMAGE = '%(original_image_name)s %(encrypted_suffix)s'
+NAME_ENCRYPTED_IMAGE_SUFFIX = '(encrypted %(nonce)s)'
 DESCRIPTION_ENCRYPTED_IMAGE = (
     '%(original_image_description)s - based on %(image_id)s, '
     'encrypted by Bracket Computing'
@@ -103,6 +104,22 @@ def _get_snapshot_progress_text(snapshots):
         for s in snapshots
     ]
     return ', '.join(elements)
+
+
+def _get_encrypted_suffix():
+    """ Return a suffix that will be appended to the encrypted image name.
+    The suffix is in the format "(encrypted 787ace7a)".  The nonce portion of
+    the suffix is necessary because Amazon requires image names to be unique.
+    """
+    # Use dots for the time because AWS doesn't allow ':' in the name.
+    nonce = str(uuid.uuid4()).split('-')[0]
+    return NAME_ENCRYPTED_IMAGE_SUFFIX % {'nonce': nonce}
+
+
+def _get_encrypted_image_name(original_name, suffix=None):
+    suffix = ' ' + (suffix or _get_encrypted_suffix())
+    max_length = 128 - len(suffix)
+    return original_name[:max_length] + suffix
 
 
 def wait_for_snapshots(svc, *snapshot_ids):
@@ -448,7 +465,7 @@ def main():
             raise Exception("Can't find image %s" % encryptor_ami)
 
         # Register the new AMI.
-        name = NAME_ENCRYPTED_IMAGE % {'original_image_name': image.name}
+        name = _get_encrypted_image_name(image.name)
         if image.description:
             description = DESCRIPTION_ENCRYPTED_IMAGE % {
                 'original_image_description': image.description,
@@ -511,4 +528,4 @@ def main():
 
 if __name__ == '__main__':
     exit_status = main()
-    sys.exit(exit_status)
+    exit(exit_status)
