@@ -11,18 +11,18 @@
 # CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and
 # limitations under the License.
+import brkt_cli
 import logging
+import re
+import unittest
 import uuid
+
 from boto.ec2.blockdevicemapping import BlockDeviceType, BlockDeviceMapping
 from boto.ec2.image import Image
 from boto.ec2.instance import Instance
 from boto.ec2.snapshot import Snapshot
 from boto.ec2.volume import Volume
-import brkt_cli
 from brkt_cli import service
-import re
-import unittest
-
 
 brkt_cli.log = logging.getLogger(__name__)
 # logging.basicConfig(level=logging.DEBUG)
@@ -37,6 +37,7 @@ class DummyEncryptorService(service.BaseEncryptorService):
     def __init__(self):
         self.is_up = False
         self.progress = 0
+        self.hostname = 'test-host'
 
     def is_encryptor_up(self):
         """ The first call returns False.  Subsequent calls return True.
@@ -46,12 +47,17 @@ class DummyEncryptorService(service.BaseEncryptorService):
             self.is_up = True
         return ret_val
 
-    def get_progress(self):
+    def get_status(self):
         """ Return progress in increments of 20% for each call.
         """
-        ret_val = self.progress
+        ret_val = {
+            'state': 'encrypting',
+            'percent_complete': self.progress,
+        }
         if self.progress < 100:
             self.progress += 20
+        else:
+            ret_val['state'] = 'finished'
         return ret_val
 
 
@@ -182,6 +188,15 @@ class DummyAWSService(service.BaseAWSService):
     def delete_snapshot(self, snapshot_id):
         del(self.snapshots[snapshot_id])
 
+    def create_security_group(self, name, description):
+        return 'sg-%s' % (_new_id(),)
+
+    def add_security_group_rule(self, sg_id, **kwargs):
+        pass
+
+    def delete_security_group(self, sg_id):
+        pass
+
 
 class TestSnapshotProgress(unittest.TestCase):
 
@@ -259,7 +274,39 @@ class TestSmoke(unittest.TestCase):
         brkt_cli.SLEEP_ENABLED = False
         brkt_cli.run(
             aws_svc=aws_svc,
-            enc_svc=DummyEncryptorService(),
+            enc_svc_cls=DummyEncryptorService,
             image_id=guest_image.id,
             encryptor_ami=encryptor_image.id
         )
+
+
+class ExpiredDeadline(object):
+    def is_expired(self):
+        return True
+
+
+class FailedEncryptionService(service.BaseEncryptorService):
+    def __init__(self):
+        pass
+
+    def is_encryptor_up(self):
+        return True
+
+    def get_status(self):
+        return {
+            'state': service.ENCRYPT_FAILED,
+            'percent_complete': 50,
+        }
+
+
+class TestEncryptionService(unittest.TestCase):
+    def test_service_fails_to_come_up(self):
+        svc = DummyEncryptorService()
+        deadline = ExpiredDeadline()
+        with self.assertRaisesRegexp(Exception, 'Unable to contact'):
+            brkt_cli._wait_for_encryptor_up(svc, deadline)
+
+    def test_encryption_fails(self):
+        svc = FailedEncryptionService()
+        with self.assertRaisesRegexp(Exception, 'Encryption failed'):
+            brkt_cli._wait_for_encryption(svc)

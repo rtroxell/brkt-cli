@@ -70,6 +70,7 @@ from boto.ec2.blockdevicemapping import (
 )
 
 from brkt_cli import service
+from brkt_cli.util import Deadline, make_nonce
 
 # End user-visible terminology.  These are resource names and descriptions
 # that the user will see in his or her EC2 console.
@@ -78,6 +79,11 @@ from brkt_cli import service
 NAME_SNAPSHOT_CREATOR = 'Bracket root snapshot creator'
 DESCRIPTION_SNAPSHOT_CREATOR = \
     'Used for creating a snapshot of the root volume from %(image_id)s'
+
+# Security group names
+NAME_ENCRYPTOR_SECURITY_GROUP = 'Bracket Encryptor %(nonce)s'
+DESCRIPTION_ENCRYPTOR_SECURITY_GROUP = (
+    "Allows access to the encryptor's status server.")
 
 # Encryptor instance names.
 NAME_ENCRYPTOR = 'Bracket volume encryptor'
@@ -170,37 +176,47 @@ def _wait_for_instance(
         _sleep(2)
 
 
-def _wait_for_encryptor_up(enc_svc, timeout=600):
-    start_time = time.time()
-    # Give the host some time to come up, to avoid ssh directly into
-    # metavisor.
-    _sleep(60)
-
-    while True:
-        now = time.time()
+def _wait_for_encryptor_up(enc_svc, deadline):
+    start = time.time()
+    while not deadline.is_expired():
         if enc_svc.is_encryptor_up():
             log.debug(
-                'Host is ssh-able now after %.1f seconds', (now - start_time)
+                'Encyption service is up after %.1f seconds',
+                time.time() - start
             )
             return
-
-        if (now - start_time) > timeout:
-            raise Exception('Unable to contact %s' % enc_svc.hostname)
         _sleep(5)
+    raise Exception('Unable to contact %s' % enc_svc.hostname)
 
 
 def _wait_for_encryption(enc_svc):
-    while True:
-        progress = enc_svc.get_progress()
-        log.debug('Encryption progress: %d%%', progress)
-        if progress >= 100:
+    err_count = 0
+    max_errs = 10
+    while err_count < max_errs:
+        try:
+            status = enc_svc.get_status()
+            err_count = 0
+        except Exception as e:
+            log.warn("Failed getting encryption status: %s", e)
+            err_count += 1
+            _sleep(10)
+            continue
+
+        log.debug('Encryption progress: %d%%', status['percent_complete'])
+        state = status['state']
+        if state == service.ENCRYPT_SUCCESSFUL:
             sys.stderr.write('\n')
             log.info('Encrypted root drive created.')
             return
+        elif state == service.ENCRYPT_FAILED:
+            raise Exception('Encryption failed')
 
         sys.stderr.write('.')
         sys.stderr.flush()
         _sleep(10)
+    # We've failed to get encryption status for _max_errs_ consecutive tries.
+    # Assume that the server has crashed.
+    raise Exception('Encryption service unavailable')
 
 
 def _get_encrypted_suffix():
@@ -208,8 +224,7 @@ def _get_encrypted_suffix():
     The suffix is in the format "(encrypted 787ace7a)".  The nonce portion of
     the suffix is necessary because Amazon requires image names to be unique.
     """
-    # Use dots for the time because AWS doesn't allow ':' in the name.
-    nonce = str(uuid.uuid4()).split('-')[0]
+    nonce = make_nonce()
     return NAME_ENCRYPTED_IMAGE_SUFFIX % {'nonce': nonce}
 
 
@@ -302,8 +317,33 @@ def _wait_for_snapshots(svc, *snapshot_ids):
         _sleep(5)
 
 
-def run_copy_instance(
-        aws_svc, encryptor_image_id, snapshot, root_size, guest_image_id):
+def create_encryptor_security_group(svc):
+    sg_name = NAME_ENCRYPTOR_SECURITY_GROUP % {'nonce': make_nonce()}
+    sg_desc = DESCRIPTION_ENCRYPTOR_SECURITY_GROUP
+    sg_id = svc.create_security_group(sg_name, sg_desc)
+    log.info('Created temporary security group with id %s', sg_id)
+    try:
+        svc.add_security_group_rule(sg_id, ip_protocol='tcp',
+                                    from_port=service.ENCRYPTOR_STATUS_PORT,
+                                    to_port=service.ENCRYPTOR_STATUS_PORT,
+                                    cidr_ip='0.0.0.0/0')
+    except Exception as e:
+        log.error('Failed adding security group rule to %s: %s', sg_id, e)
+        try:
+            log.info('Cleaning up temporary security group %s', sg_id)
+            svc.delete_security_group(sg_id)
+        except Exception as e2:
+            log.warn('Failed deleting temporary security group: %s', e2)
+        raise e
+    try:
+        svc.create_tags(sg_id)
+    except Exception as e:
+        log.error('Failed tagging security group %s: %s', sg_id, e)
+    return sg_id
+
+
+def run_copy_instance(aws_svc, encryptor_image_id, snapshot, root_size,
+                      guest_image_id, sg_id):
     log.info('Launching encryptor instance with snapshot %s', snapshot)
 
     # Use gp2 for fast burst I/O copying root drive
@@ -322,7 +362,9 @@ def run_copy_instance(
     guest_encrypted_root.size = 2 * root_size + 1
     bdm['/dev/sda5'] = guest_encrypted_root
 
-    instance = aws_svc.run_instance(encryptor_image_id, block_device_map=bdm)
+    instance = aws_svc.run_instance(encryptor_image_id,
+                                    security_group_ids=[sg_id],
+                                    block_device_map=bdm)
     aws_svc.create_tags(
         instance.id,
         name=NAME_ENCRYPTOR,
@@ -388,24 +430,29 @@ def create_root_snapshot(aws_svc, ami):
     return ret_values
 
 
-def run(aws_svc, enc_svc, image_id, encryptor_ami):
+def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
     copy_instance = None
     exit_status = 0
     ami = None
     snapshot_id = None
+    sg_id = None
 
     try:
         snapshot_id, root_dev, size, vol_type, iops = create_root_snapshot(
             aws_svc, image_id
         )
+
+        sg_id = create_encryptor_security_group(aws_svc)
+
         copy_instance = run_copy_instance(
-            aws_svc, encryptor_ami, snapshot_id, size, image_id
+            aws_svc, encryptor_ami, snapshot_id, size, image_id, sg_id
         )
 
         host_ip = copy_instance.ip_address
-        enc_svc.set_hostname(host_ip)
-        log.info('Waiting for ssh to %s at %s', copy_instance.id, host_ip)
-        _wait_for_encryptor_up(enc_svc)
+        enc_svc = enc_svc_cls(host_ip)
+        log.info('Waiting for encryption service on %s at %s',
+                 copy_instance.id, host_ip)
+        _wait_for_encryptor_up(enc_svc, Deadline(600))
         log.info('Creating encrypted root drive.')
         _wait_for_encryption(enc_svc)
         log.info('Encrypted root drive is ready.')
@@ -535,6 +582,14 @@ def run(aws_svc, enc_svc, image_id, encryptor_ami):
         log.info('Terminating encryptor instance %s', copy_instance.id)
         aws_svc.terminate_instance(copy_instance.id)
 
+    if sg_id:
+        log.info('Deleting temporary security group %s', sg_id)
+        try:
+            _wait_for_instance(aws_svc, copy_instance.id, state='terminated')
+            aws_svc.delete_security_group(sg_id)
+        except Exception as e:
+            log.warn('Failed deleting security group %s: %s', sg_id, e)
+
     if snapshot_id:
         log.info('Deleting snapshot copy of original root volume %s',
                  snapshot_id)
@@ -663,7 +718,7 @@ def main():
     log.info('Starting encryptor session %s', aws_svc.session_id)
     run(
         aws_svc=aws_svc,
-        enc_svc=service.EncryptorService(),
+        enc_svc_cls=service.EncryptorService,
         image_id=values.ami,
         encryptor_ami=encryptor_ami
     )

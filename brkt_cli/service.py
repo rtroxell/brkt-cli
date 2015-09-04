@@ -13,27 +13,20 @@
 # limitations under the License.
 
 import abc
-import logging
-import subprocess
 import boto
+import logging
+import json
+import urllib2
+
 from boto.exception import EC2ResponseError
+
+ENCRYPT_SUCCESSFUL = 'finished'
+ENCRYPT_FAILED = 'failed'
+ENCRYPTOR_STATUS_PORT = 8000
 
 PLATFORM_WINDOWS = 'windows'
 
-sshflags = " ".join([
-    "-o UserKnownHostsFile=/dev/null",
-    "-o LogLevel=quiet",
-    "-o StrictHostKeyChecking=no",
-    "-o ConnectTimeout=5",
-])
-
 log = logging.getLogger(__name__)
-
-
-def _ssh(user, external_ip, sshcommand):
-    command = 'ssh %s %s@%s "%s"' % (sshflags, user, external_ip, sshcommand)
-    log.debug(command)
-    return subprocess.check_output(command, shell=True)
 
 
 class BaseAWSService(object):
@@ -106,6 +99,18 @@ class BaseAWSService(object):
     def delete_snapshot(self, snapshot_id):
         pass
 
+    @abc.abstractmethod
+    def create_security_group(self, name, description):
+        pass
+
+    @abc.abstractmethod
+    def add_security_group_rule(self, sg_id, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def delete_security_group(self, sg_id):
+        pass
+
 
 class AWSService(BaseAWSService):
 
@@ -130,18 +135,22 @@ class AWSService(BaseAWSService):
 
     def run_instance(self,
                      image_id,
+                     security_group_ids=None,
                      instance_type='m3.medium',
                      block_device_map=None):
+        if security_group_ids is None:
+            security_group_ids = []
         log.debug('Starting a new instance based on %s', image_id)
         try:
             reservation = self.conn.run_instances(
                 image_id=image_id,
                 key_name=self.key_name,
                 instance_type=instance_type,
-                block_device_map=block_device_map
+                block_device_map=block_device_map,
+                security_group_ids=security_group_ids
             )
             return reservation.instances[0]
-        except EC2ResponseError, e:
+        except EC2ResponseError:
             # Log the failed operation, so that the user has context.
             log.error('Unable to launch instance for %s', image_id)
             raise
@@ -165,7 +174,7 @@ class AWSService(BaseAWSService):
 
     def terminate_instance(self, instance_id):
         log.debug('Terminating instance %s', instance_id)
-        instances = self.conn.terminate_instances([instance_id])
+        self.conn.terminate_instances([instance_id])
 
     def get_volume(self, volume_id):
         return self.conn.get_all_volumes(volume_ids=[volume_id])[0]
@@ -241,50 +250,58 @@ class AWSService(BaseAWSService):
     def delete_snapshot(self, snapshot_id):
         return self.conn.delete_snapshot(snapshot_id)
 
+    def create_security_group(self, name, description):
+        sg = self.conn.create_security_group(name, description)
+        return sg.id
+
+    def add_security_group_rule(self, sg_id, **kwargs):
+        kwargs['group_id'] = sg_id
+        ok = self.conn.authorize_security_group(**kwargs)
+        if not ok:
+            raise Exception('Unknown error while adding security group rule')
+
+    def delete_security_group(self, sg_id):
+        ok = self.conn.delete_security_group(group_id=sg_id)
+        if not ok:
+            raise Exception('Unknown error while deleting security group')
+
 
 class BaseEncryptorService(object):
     __metaclass__ = abc.ABCMeta
 
-    def __init__(self):
-        self.hostname = None
-
-    def set_hostname(self, hostname):
+    def __init__(self, hostname, port=ENCRYPTOR_STATUS_PORT):
         self.hostname = hostname
+        self.port = port
 
     @abc.abstractmethod
     def is_encryptor_up(self):
         pass
 
     @abc.abstractmethod
-    def get_progress(self):
+    def get_status(self):
         pass
 
 
 class EncryptorService(BaseEncryptorService):
 
     def is_encryptor_up(self):
-        if not self.hostname:
-            raise Exception('hostname has not been set')
-
         try:
-            _ssh('avatar', self.hostname, 'ls')
+            self.get_status()
             return True
-        except subprocess.CalledProcessError, e:
-            log.debug('Could not ssh into encryptor: %s', e)
+        except Exception as e:
+            log.debug("Couldn't get encryptor status: %s", e)
             return False
 
-    def get_progress(self):
-        if not self.hostname:
-            raise Exception('hostname has not been set')
-
-        try:
-            seed_yaml = _ssh(
-                'avatar', self.hostname, 'cat /etc/brkt/seed.yaml'
-            )
-            if 'avatar_solo_created: true' in seed_yaml:
-                return 100
-            else:
-                return 0
-        except subprocess.CalledProcessError, e:
-            log.warn('Could not check seed.yaml: %s', e)
-            return 0
+    def get_status(self, timeout_secs=2):
+        url = 'http://%s:%d/encryption_status' % (self.hostname, self.port)
+        r = urllib2.urlopen(url, timeout=timeout_secs)
+        data = r.read()
+        info = json.loads(data)
+        ratio = 0
+        info['percent_complete'] = 0
+        if info['state'] == ENCRYPT_SUCCESSFUL:
+            info['percent_complete'] = 100
+        elif info['bytes_total'] > 0:
+            ratio = float(info['bytes_written']) / info['bytes_total']
+            info['percent_complete'] = int(100 * ratio)
+        return info
