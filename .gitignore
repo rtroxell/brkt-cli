@@ -1,2 +1,9 @@
 .idea
 *.pyc
+
+.ropeproject/
+
+# setuptools artifacts
+*.egg-info/
+build/
+dist/

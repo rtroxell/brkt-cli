@@ -53,15 +53,21 @@ import boto
 import boto.ec2
 import boto.vpc
 import logging
+import os
+import re
+import requests
+import string
 import sys
 import time
-import string
-import re
 import uuid
+import warnings
 
 from boto.exception import EC2ResponseError
-from boto.ec2.blockdevicemapping import (BlockDeviceMapping,
-        BlockDeviceType, EBSBlockDeviceType)
+from boto.ec2.blockdevicemapping import (
+    BlockDeviceMapping,
+    BlockDeviceType,
+    EBSBlockDeviceType
+)
 
 from brkt_cli import service
 
@@ -104,6 +110,12 @@ DEFAULT_DESCRIPTION_ENCRYPTED_IMAGE = \
     'Based on %(image_id)s, encrypted by Bracket Computing'
 
 SLEEP_ENABLED = True
+
+# Right now this is the STAGE endpoint. We need to make this PROD
+# when we have customers running this. This is superceded by the
+# API_URL environment variable if it exists
+API_URL = \
+    "https://stage-api-lb-1316607304.us-west-2.elb.amazonaws.com"
 
 log = None
 
@@ -206,6 +218,22 @@ def _get_encrypted_image_name(original_name, suffix=None):
     max_length = 128 - len(suffix)
     return original_name[:max_length] + suffix
 
+def _get_encryptor_ami(region):
+    api_url = os.environ.get('API_URL', API_URL)
+    if not api_url:
+        raise Exception('No API URL found')
+    # This suppresses warnings about no `subjectAltName` for cert.
+    # TODO: remove when the cert has subjectAltName
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = requests.get("%s/api/v1/encryptor_ami/%s" %
+                         (api_url, region), verify="ca_cert.pem")
+    if r.status_code not in (200,201):
+        raise Exception('Getting encryptor ami gave response: %s', r.text)
+    ami = r.json()['ami_id']
+    if not ami:
+        raise Exception('No AMI id returned.')
+    return ami
 
 def _wait_for_image(amazon_svc, image_id):
     log.debug('Waiting for %s to become available.', image_id)
@@ -545,7 +573,7 @@ def main():
         metavar='ID',
         dest='encryptor_ami',
         help='Bracket Encryptor AMI',
-        required=True
+        required=False
     )
     encrypt_ami.add_argument(
         '--key',
@@ -601,16 +629,24 @@ def main():
         )
         return 1
 
+    encryptor_ami = values.encryptor_ami
+    if not encryptor_ami:
+        try:
+            encryptor_ami = _get_encryptor_ami(region)
+        except:
+            log.exception('Failed to get encryptor AMI.')
+            return 1
+
     session_id = uuid.uuid4().hex
     default_tags = {
         TAG_ENCRYPTOR: True,
         TAG_ENCRYPTOR_SESSION_ID: session_id,
-        TAG_ENCRYPTOR_AMI: values.encryptor_ami
+        TAG_ENCRYPTOR_AMI: encryptor_ami
     }
 
     # Connect to AWS.
     aws_svc = service.AWSService(
-        session_id, values.encryptor_ami, default_tags=default_tags)
+        session_id, encryptor_ami, default_tags=default_tags)
     aws_svc.connect(values.key_name, region)
 
     if not values.no_validate_ami:
@@ -619,7 +655,7 @@ def main():
             print(error, file=sys.stderr)
             return 1
 
-        error = aws_svc.validate_encryptor_ami(values.encryptor_ami)
+        error = aws_svc.validate_encryptor_ami(encryptor_ami)
         if error:
             print(error, file=sys.stderr)
             return 1
@@ -629,7 +665,7 @@ def main():
         aws_svc=aws_svc,
         enc_svc=service.EncryptorService(),
         image_id=values.ami,
-        encryptor_ami=values.encryptor_ami
+        encryptor_ami=encryptor_ami
     )
 
 if __name__ == '__main__':
