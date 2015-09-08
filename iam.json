@@ -3,20 +3,6 @@
     "Statement": [
         {
             "Action": [
-                "ec2:TerminateInstances",
-                "ec2:DeleteVolume",
-                "ec2:StopInstances"
-            ],
-            "Effect": "Allow",
-            "Resource": "*",
-            "Condition": {
-                "StringEquals": {
-                    "ec2:ResourceTag/BrktEncryptor": "True"
-                }
-            }
-        },
-        {
-            "Action": [
                 "ec2:CreateTags",
                 "ec2:CreateSnapshot",
                 "ec2:RunInstances",
@@ -29,7 +15,10 @@
                 "ec2:DescribeSnapshots",
                 "ec2:RegisterImage",
                 "ec2:CopySnapshot",
-                "ec2:DeleteSnapshot"
+                "ec2:DeleteSnapshot",
+                "ec2:TerminateInstances",
+                "ec2:DeleteVolume",
+                "ec2:StopInstances"
             ],
             "Effect": "Allow",
             "Resource": "*"
