@@ -25,6 +25,8 @@ from boto.ec2.volume import Volume
 from brkt_cli import service
 
 brkt_cli.log = logging.getLogger(__name__)
+
+# Uncomment the next line to turn on logging when running unit tests.
 # logging.basicConfig(level=logging.DEBUG)
 
 
@@ -34,10 +36,10 @@ def _new_id():
 
 class DummyEncryptorService(service.BaseEncryptorService):
 
-    def __init__(self):
+    def __init__(self, hostname='test-host', port=8000):
+        super(DummyEncryptorService, self).__init__(hostname, port)
         self.is_up = False
         self.progress = 0
-        self.hostname = 'test-host'
 
     def is_encryptor_up(self):
         """ The first call returns False.  Subsequent calls return True.
@@ -73,6 +75,7 @@ class DummyAWSService(service.BaseAWSService):
 
     def run_instance(self,
                      image_id,
+                     security_group_ids=None,
                      instance_type='m3.medium',
                      block_device_map=None):
         instance = Instance()
@@ -272,12 +275,13 @@ class TestSmoke(unittest.TestCase):
 
         # Run the smoke test.
         brkt_cli.SLEEP_ENABLED = False
-        brkt_cli.run(
+        encrypted_ami_id = brkt_cli.run(
             aws_svc=aws_svc,
             enc_svc_cls=DummyEncryptorService,
             image_id=guest_image.id,
             encryptor_ami=encryptor_image.id
         )
+        self.assertIsNotNone(encrypted_ami_id)
 
 
 class ExpiredDeadline(object):

@@ -62,7 +62,7 @@ import time
 import uuid
 import warnings
 
-from boto.exception import EC2ResponseError
+from boto.exception import EC2ResponseError, NoAuthHandlerFound
 from boto.ec2.blockdevicemapping import (
     BlockDeviceMapping,
     BlockDeviceType,
@@ -233,6 +233,7 @@ def _get_encrypted_image_name(original_name, suffix=None):
     max_length = 128 - len(suffix)
     return original_name[:max_length] + suffix
 
+
 def _get_encryptor_ami(region):
     api_url = os.environ.get('API_URL', API_URL)
     if not api_url:
@@ -243,12 +244,13 @@ def _get_encryptor_ami(region):
         warnings.simplefilter("ignore")
         r = requests.get("%s/api/v1/encryptor_ami/%s" %
                          (api_url, region), verify="ca_cert.pem")
-    if r.status_code not in (200,201):
+    if r.status_code not in (200, 201):
         raise Exception('Getting encryptor ami gave response: %s', r.text)
     ami = r.json()['ami_id']
     if not ami:
         raise Exception('No AMI id returned.')
     return ami
+
 
 def _wait_for_image(amazon_svc, image_id):
     log.debug('Waiting for %s to become available.', image_id)
@@ -432,7 +434,6 @@ def create_root_snapshot(aws_svc, ami):
 
 def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
     copy_instance = None
-    exit_status = 0
     ami = None
     snapshot_id = None
     sg_id = None
@@ -573,35 +574,33 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
 
         _wait_for_image(aws_svc, ami)
         log.info('Created encrypted AMI %s based on %s', ami, image_id)
-    except Exception:
-        # TODO: Better exception handling
-        log.exception('Aborting')
-        exit_status = 1
+    finally:
+        if copy_instance:
+            try:
+                log.info('Terminating encryptor instance %s', copy_instance.id)
+                aws_svc.terminate_instance(copy_instance.id)
+            except:
+                log.exception('Could not terminate instance %s', copy_instance)
 
-    if copy_instance:
-        log.info('Terminating encryptor instance %s', copy_instance.id)
-        aws_svc.terminate_instance(copy_instance.id)
+        if sg_id:
+            try:
+                log.info('Deleting temporary security group %s', sg_id)
+                _wait_for_instance(
+                    aws_svc, copy_instance.id, state='terminated')
+                aws_svc.delete_security_group(sg_id)
+            except Exception as e:
+                log.warn('Failed deleting security group %s: %s', sg_id, e)
 
-    if sg_id:
-        log.info('Deleting temporary security group %s', sg_id)
-        try:
-            _wait_for_instance(aws_svc, copy_instance.id, state='terminated')
-            aws_svc.delete_security_group(sg_id)
-        except Exception as e:
-            log.warn('Failed deleting security group %s: %s', sg_id, e)
-
-    if snapshot_id:
-        log.info('Deleting snapshot copy of original root volume %s',
-                 snapshot_id)
-        aws_svc.delete_snapshot(snapshot_id)
+        if snapshot_id:
+            try:
+                log.info('Deleting snapshot copy of original root volume %s',
+                         snapshot_id)
+                aws_svc.delete_snapshot(snapshot_id)
+            except:
+                log.exception('Could not delete snapshot %s', snapshot_id)
 
     log.info('Done.')
-    if ami:
-        # Print the AMI ID to stdout, in case the caller wants to process
-        # the output.  Log messages go to stderr.
-        print(ami)
-
-    return exit_status
+    return ami
 
 
 def main():
@@ -667,6 +666,8 @@ def main():
     if values.verbose:
         log_level = logging.DEBUG
     else:
+        # Boto logs auth errors and 401s at ERROR level by default.
+        boto.log.setLevel(logging.FATAL)
         log_level = logging.INFO
     logging.basicConfig(format='%(asctime)s %(message)s', datefmt='%H:%M:%S')
     global log
@@ -699,29 +700,57 @@ def main():
         TAG_ENCRYPTOR_AMI: encryptor_ami
     }
 
-    # Connect to AWS.
-    aws_svc = service.AWSService(
-        session_id, encryptor_ami, default_tags=default_tags)
-    aws_svc.connect(values.key_name, region)
+    try:
+        # Connect to AWS.
+        aws_svc = service.AWSService(
+            session_id, encryptor_ami, default_tags=default_tags)
+        aws_svc.connect(values.key_name, region)
+    except NoAuthHandlerFound:
+        msg = (
+            'Unable to connect to AWS.  Are your AWS_ACCESS_KEY_ID and '
+            'AWS_SECRET_ACCESS_KEY environment variables set?'
+        )
+        if values.verbose:
+            log.exception(msg)
+        else:
+            log.error(msg)
+        return 1
 
-    if not values.no_validate_ami:
-        error = aws_svc.validate_guest_ami(values.ami)
-        if error:
-            print(error, file=sys.stderr)
-            return 1
+    try:
+        if not values.no_validate_ami:
+            error = aws_svc.validate_guest_ami(values.ami)
+            if error:
+                print(error, file=sys.stderr)
+                return 1
 
-        error = aws_svc.validate_encryptor_ami(encryptor_ami)
-        if error:
-            print(error, file=sys.stderr)
-            return 1
+            error = aws_svc.validate_encryptor_ami(encryptor_ami)
+            if error:
+                print(error, file=sys.stderr)
+                return 1
 
-    log.info('Starting encryptor session %s', aws_svc.session_id)
-    run(
-        aws_svc=aws_svc,
-        enc_svc_cls=service.EncryptorService,
-        image_id=values.ami,
-        encryptor_ami=encryptor_ami
-    )
+        log.info('Starting encryptor session %s', aws_svc.session_id)
+
+        encrypted_image_id = run(
+            aws_svc=aws_svc,
+            enc_svc_cls=service.EncryptorService,
+            image_id=values.ami,
+            encryptor_ami=encryptor_ami
+        )
+        # Print the AMI ID to stdout, in case the caller wants to process
+        # the output.  Log messages go to stderr.
+        print(encrypted_image_id)
+        return 0
+    except EC2ResponseError as e:
+        if e.error_code == 'AuthFailure':
+            msg = 'Check your AWS login credentials and permissions'
+            if values.verbose:
+                log.exception(msg)
+            else:
+                log.error(msg + ': ' + e.error_message)
+        else:
+            raise
+
+    return 1
 
 if __name__ == '__main__':
     exit_status = main()

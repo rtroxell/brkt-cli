@@ -35,6 +35,7 @@ class BaseAWSService(object):
     @abc.abstractmethod
     def run_instance(self,
                      image_id,
+                     security_group_ids=None,
                      instance_type='m3.medium',
                      block_device_map=None):
         pass
@@ -197,7 +198,10 @@ class AWSService(BaseAWSService):
         try:
             images = self.conn.get_all_images([ami_id])
         except EC2ResponseError, e:
-            return e.error_message
+            if e.error_code == 'InvalidAMIID.NotFound':
+                return e.error_message
+            else:
+                raise
         if len(images) == 0:
             return '%s is no longer available' % ami_id
         image = images[0]
