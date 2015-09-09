@@ -83,7 +83,7 @@ DESCRIPTION_SNAPSHOT_CREATOR = \
 # Security group names
 NAME_ENCRYPTOR_SECURITY_GROUP = 'Bracket Encryptor %(nonce)s'
 DESCRIPTION_ENCRYPTOR_SECURITY_GROUP = (
-    "Allows access to the encryptor's status server.")
+    "Allows access to the encryption service.")
 
 # Encryptor instance names.
 NAME_ENCRYPTOR = 'Bracket volume encryptor'
