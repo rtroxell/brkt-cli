@@ -112,6 +112,10 @@ class BaseAWSService(object):
     def delete_security_group(self, sg_id):
         pass
 
+    @abc.abstractmethod
+    def get_key_pair(self, keyname):
+        pass
+
 
 class AWSService(BaseAWSService):
 
@@ -268,6 +272,9 @@ class AWSService(BaseAWSService):
         ok = self.conn.delete_security_group(group_id=sg_id)
         if not ok:
             raise Exception('Unknown error while deleting security group')
+
+    def get_key_pair(self, keyname):
+        return self.conn.get_all_key_pairs(keynames=[keyname])[0]
 
 
 class BaseEncryptorService(object):

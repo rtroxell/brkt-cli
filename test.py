@@ -11,6 +11,7 @@
 # CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and
 # limitations under the License.
+from boto.ec2.keypair import KeyPair
 import brkt_cli
 import logging
 import re
@@ -199,6 +200,11 @@ class DummyAWSService(service.BaseAWSService):
 
     def delete_security_group(self, sg_id):
         pass
+
+    def get_key_pair(self, keyname):
+        kp = KeyPair()
+        kp.name = keyname
+        return kp
 
 
 class TestSnapshotProgress(unittest.TestCase):

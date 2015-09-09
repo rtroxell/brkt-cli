@@ -717,6 +717,7 @@ def main():
         return 1
 
     try:
+        aws_svc.get_key_pair(values.key_name)
         if not values.no_validate_ami:
             error = aws_svc.validate_guest_ami(values.ami)
             if error:
@@ -747,6 +748,20 @@ def main():
                 log.exception(msg)
             else:
                 log.error(msg + ': ' + e.error_message)
+        elif e.error_code == 'InvalidKeyPair.NotFound':
+            if values.verbose:
+                log.exception(e.error_message)
+            else:
+                log.error(e.error_message)
+        elif e.error_code == 'UnauthorizedOperation':
+            if values.verbose:
+                log.exception(e.error_message)
+            else:
+                log.error(e.error_message)
+            log.error(
+                'Unauthorized operation.  Check the IAM policy for your '
+                'AWS account.'
+            )
         else:
             raise
 
