@@ -1,8 +1,12 @@
-**brkt-cli** is a command-line interface to the Bracket service.  It
-produces an encrypted version of an Amazon Machine Image, which can then be
+**brkt-cli** is a command-line interface to the [Bracket Computing](http://www.brkt.com)
+service.  It produces an encrypted version of an Amazon Machine Image, which can then be
 launched in EC2.
 
 ## Requirements
+
+In order to use the Bracket service, you must be a
+registered Bracket customer.  Email support@brkt.com for
+more information.
 
 **brkt-cli** requires Python 2.7.9+ with a corresponding openssl
 version of 1.0.1+
@@ -13,19 +17,25 @@ Use **pip** to install **brkt-cli** directly from the GitHub repo:
 
 ```
 $ pip install git+ssh://git@github.int.brkt.net/brkt/brkt-cli.git
-Collecting git+ssh://git@github.int.brkt.net/brkt/brkt-cli.git
-  Cloning ssh://git@github.int.brkt.net/brkt/brkt-cli.git to /var/folders/tz/k2yndc9j5bj5dgzngb1g67rc0000gn/T/pip-tekQzC-build
-Collecting boto>=2.38.0 (from brkt-cli==0.9a1)
-  Using cached boto-2.38.0-py2.py3-none-any.whl
-Collecting requests>=2.7.0 (from brkt-cli==0.9a1)
-  Downloading requests-2.7.0-py2.py3-none-any.whl (470kB)
-    100% |################################| 471kB 10.9MB/s
-Installing collected packages: brkt-cli, requests, boto
-  Running setup.py install for brkt-cli
-    Installing brkt script to /usr/local/bin
+```
 
+## Usage
+```
+$ ./brkt encrypt-ami -h
+usage: brkt encrypt-ami [-h] [--encryptor-ami ID] --key NAME [--validate-ami]
+                        [--no-validate-ami] --region NAME
+                        AMI_ID
 
-Successfully installed boto-2.38.0 brkt-cli-0.9a1 requests-2.7.0
+positional arguments:
+  AMI_ID              The AMI that will be encrypted
+
+optional arguments:
+  -h, --help          show this help message and exit
+  --encryptor-ami ID  Bracket Encryptor AMI
+  --key NAME          EC2 SSH Key Pair name
+  --validate-ami      Validate AMI properties (default)
+  --no-validate-ami   Don't validate AMI properties
+  --region NAME       AWS region (e.g. us-west-2)
 ```
 
 ## Configuration
