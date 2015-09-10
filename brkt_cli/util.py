@@ -34,3 +34,12 @@ class Deadline(object):
             True if the deadline has passed. False otherwise.
         """
         return self.clock.time() >= self.deadline
+
+
+def estimate_seconds_remaining(start_time, percent_complete, now=None):
+    if percent_complete == 0:
+        return 0
+    now = now or time.time()
+    elapsed = now - start_time
+    total = elapsed / (float(percent_complete) / 100)
+    return total - elapsed

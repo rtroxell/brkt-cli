@@ -55,6 +55,7 @@ import boto.vpc
 import logging
 import os
 import re
+import datetime
 import requests
 import string
 import sys
@@ -208,9 +209,23 @@ def _wait_for_encryptor_up(enc_svc, deadline):
     raise Exception('Unable to contact %s' % enc_svc.hostname)
 
 
+def _get_encryption_progress_message(start_time, percent_complete, now=None):
+    msg = 'Encryption is %d%% complete' % percent_complete
+    if percent_complete > 0:
+        remaining = util.estimate_seconds_remaining(
+            start_time, percent_complete)
+        msg += (
+            ', %s remaining' % datetime.timedelta(seconds=int(remaining))
+        )
+    return msg
+
+
 def _wait_for_encryption(enc_svc):
     err_count = 0
     max_errs = 10
+    start_time = time.time()
+    last_progress_log = start_time
+
     while err_count < max_errs:
         try:
             status = enc_svc.get_status()
@@ -221,17 +236,24 @@ def _wait_for_encryption(enc_svc):
             _sleep(10)
             continue
 
-        log.debug('Encryption progress: %d%%', status['percent_complete'])
         state = status['state']
+        percent_complete = status['percent_complete']
+        log.debug('state=%s, percent_complete=%d', state, percent_complete)
+
+        # Log progress once a minute.
+        now = time.time()
+        if now - last_progress_log >= 60:
+            msg = _get_encryption_progress_message(
+                start_time, percent_complete)
+            log.info(msg)
+            last_progress_log = now
+
         if state == service.ENCRYPT_SUCCESSFUL:
-            sys.stderr.write('\n')
             log.info('Encrypted root drive created.')
             return
         elif state == service.ENCRYPT_FAILED:
             raise Exception('Encryption failed')
 
-        sys.stderr.write('.')
-        sys.stderr.flush()
         _sleep(10)
     # We've failed to get encryption status for _max_errs_ consecutive tries.
     # Assume that the server has crashed.

@@ -16,6 +16,7 @@ from boto.ec2.securitygroup import SecurityGroup
 import brkt_cli
 import logging
 import re
+import time
 import unittest
 import uuid
 
@@ -24,7 +25,7 @@ from boto.ec2.image import Image
 from boto.ec2.instance import Instance
 from boto.ec2.snapshot import Snapshot
 from boto.ec2.volume import Volume
-from brkt_cli import service
+from brkt_cli import service, util
 
 brkt_cli.log = logging.getLogger(__name__)
 
@@ -324,3 +325,32 @@ class TestEncryptionService(unittest.TestCase):
         svc = FailedEncryptionService()
         with self.assertRaisesRegexp(Exception, 'Encryption failed'):
             brkt_cli._wait_for_encryption(svc)
+
+
+class TestProgress(unittest.TestCase):
+
+    def test_estimate_seconds_remaining(self):
+        # 10 seconds elapsed, 5% completed.
+        now = time.time()
+        remaining = util.estimate_seconds_remaining(
+            start_time=now - 10,
+            now=now,
+            percent_complete=5
+        )
+        self.assertEqual(190, int(remaining))
+
+    def test_encryption_progress_message(self):
+        now = time.time()
+        self.assertEquals(
+            'Encryption is 0% complete',
+            brkt_cli._get_encryption_progress_message(now, 0)
+        )
+
+        self.assertEquals(
+            'Encryption is 5% complete, 0:03:10 remaining',
+            brkt_cli._get_encryption_progress_message(
+                start_time=now - 10,
+                percent_complete=5,
+                now=now,
+            )
+        )
