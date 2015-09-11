@@ -117,6 +117,8 @@ DEFAULT_DESCRIPTION_ENCRYPTED_IMAGE = \
 
 SLEEP_ENABLED = True
 
+EVENTUAL_CONSISTENCY_TIMEOUT = 10
+
 # Right now this is the STAGE endpoint. We need to make this PROD
 # when we have customers running this. This is superceded by the
 # API_URL environment variable if it exists
@@ -144,6 +146,25 @@ def _sleep(seconds):
         time.sleep(seconds)
 
 
+def _safe_get_instance(aws_svc, instance_id):
+    """ Get the instance and handle AWS eventual consistency lag.
+    """
+    deadline = Deadline(EVENTUAL_CONSISTENCY_TIMEOUT)
+    instance = None
+    while instance is None:
+        try:
+            instance = aws_svc.get_instance(instance_id)
+        except EC2ResponseError as e:
+            if e.error_code == 'InvalidInstanceID.NotFound':
+                log.debug('Instance was not found.  Sleeping.')
+                _sleep(2)
+            else:
+                raise
+        if deadline.is_expired():
+            raise Exception('Invalid instance id: ' + instance_id)
+    return instance
+
+
 def _wait_for_instance(
         aws_svc, instance_id, timeout=300, state='running'):
     """ Wait for up to timeout seconds for an instance to be in the
@@ -151,21 +172,14 @@ def _wait_for_instance(
     :return: The Instance object, or None if a timeout occurred
     """
 
-    start_timestamp = time.time()
-
     log.debug(
         'Waiting for %s, timeout=%d, state=%s',
         instance_id, timeout, state)
 
-    # Give the AWS some time to propagate the instance creation.
-    # If we create and get immediately, AWS may return 400.  We'll fix
-    # this properly for NUC-9311.
-    _sleep(10)
-
-    while True:
-        if (time.time() - start_timestamp) > timeout:
-            return None
-        instance = aws_svc.get_instance(instance_id)
+    # Wait for AWS eventual consistency to catch up.
+    instance = _safe_get_instance(aws_svc, instance_id)
+    deadline = Deadline(timeout)
+    while not deadline.is_expired():
         log.debug('Instance %s state=%s', instance.id, instance.state)
         if instance.state == state:
             return instance
@@ -174,6 +188,11 @@ def _wait_for_instance(
                 'Instance %s is in an error state.  Cannot proceed.'
             )
         _sleep(2)
+        instance = aws_svc.get_instance(instance_id)
+    raise Exception(
+        'Timed out waiting for %s to be in the %s state' %
+        (instance_id, state)
+    )
 
 
 def _wait_for_encryptor_up(enc_svc, deadline):
@@ -319,6 +338,20 @@ def _wait_for_snapshots(svc, *snapshot_ids):
         _sleep(5)
 
 
+def _wait_for_security_group(aws_svc, sg_id):
+    log.debug('Waiting for security group %s', sg_id)
+    deadline = Deadline(EVENTUAL_CONSISTENCY_TIMEOUT)
+    while not deadline.is_expired():
+        try:
+            return aws_svc.get_security_group(sg_id)
+        except EC2ResponseError as e:
+            if e.error_code == 'InvalidGroup.NotFound':
+                _sleep(2)
+            else:
+                raise
+    raise Exception('Timed out waiting for security group ' + sg_id)
+
+
 def create_encryptor_security_group(svc):
     sg_name = NAME_ENCRYPTOR_SECURITY_GROUP % {'nonce': make_nonce()}
     sg_desc = DESCRIPTION_ENCRYPTOR_SECURITY_GROUP
@@ -337,10 +370,9 @@ def create_encryptor_security_group(svc):
         except Exception as e2:
             log.warn('Failed deleting temporary security group: %s', e2)
         raise e
-    try:
-        svc.create_tags(sg_id)
-    except Exception as e:
-        log.error('Failed tagging security group %s: %s', sg_id, e)
+
+    _wait_for_security_group(svc, sg_id)
+    svc.create_tags(sg_id)
     return sg_id
 
 
@@ -367,6 +399,7 @@ def run_copy_instance(aws_svc, encryptor_image_id, snapshot, root_size,
     instance = aws_svc.run_instance(encryptor_image_id,
                                     security_group_ids=[sg_id],
                                     block_device_map=bdm)
+    _safe_get_instance(aws_svc, instance.id)
     aws_svc.create_tags(
         instance.id,
         name=NAME_ENCRYPTOR,
@@ -387,6 +420,7 @@ def create_root_snapshot(aws_svc, ami):
     log.info(
         'Launching instance %s to snapshot root disk for %s',
         instance.id, ami)
+    _safe_get_instance(aws_svc, instance.id)
     aws_svc.create_tags(
         instance.id,
         name=NAME_SNAPSHOT_CREATOR,
@@ -555,7 +589,6 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
                 block_device_map=new_bdm
             )
             log.info('Registered AMI %s based on the snapshots.', ami)
-            aws_svc.create_tags(ami)
         except EC2ResponseError, e:
             # Sometimes register_image fails with an InvalidAMIID.NotFound
             # error and a message like "The image id '[ami-f9fcf3c9]' does not
@@ -573,20 +606,25 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
                 raise
 
         _wait_for_image(aws_svc, ami)
+        aws_svc.create_tags(ami)
         log.info('Created encrypted AMI %s based on %s', ami, image_id)
     finally:
         if copy_instance:
             try:
                 log.info('Terminating encryptor instance %s', copy_instance.id)
                 aws_svc.terminate_instance(copy_instance.id)
-            except:
-                log.exception('Could not terminate instance %s', copy_instance)
+            except Exception as e:
+                log.warn(
+                    'Could not terminate instance %s: %s', copy_instance, e)
+                # Don't wait for instance later if we couldn't terminate it.
+                copy_instance = None
 
         if sg_id:
             try:
                 log.info('Deleting temporary security group %s', sg_id)
-                _wait_for_instance(
-                    aws_svc, copy_instance.id, state='terminated')
+                if copy_instance:
+                    _wait_for_instance(
+                        aws_svc, copy_instance.id, state='terminated')
                 aws_svc.delete_security_group(sg_id)
             except Exception as e:
                 log.warn('Failed deleting security group %s: %s', sg_id, e)
@@ -596,8 +634,8 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
                 log.info('Deleting snapshot copy of original root volume %s',
                          snapshot_id)
                 aws_svc.delete_snapshot(snapshot_id)
-            except:
-                log.exception('Could not delete snapshot %s', snapshot_id)
+            except Exception as e:
+                log.warn('Could not delete snapshot %s: %s', snapshot_id, e)
 
     log.info('Done.')
     return ami

@@ -105,6 +105,10 @@ class BaseAWSService(object):
         pass
 
     @abc.abstractmethod
+    def get_security_group(self, sg_id):
+        pass
+
+    @abc.abstractmethod
     def add_security_group_rule(self, sg_id, **kwargs):
         pass
 
@@ -261,6 +265,9 @@ class AWSService(BaseAWSService):
     def create_security_group(self, name, description):
         sg = self.conn.create_security_group(name, description)
         return sg.id
+
+    def get_security_group(self, sg_id):
+        return self.conn.get_all_security_groups(group_ids=[sg_id])[0]
 
     def add_security_group_rule(self, sg_id, **kwargs):
         kwargs['group_id'] = sg_id

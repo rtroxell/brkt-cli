@@ -12,6 +12,7 @@
 # License for the specific language governing permissions and
 # limitations under the License.
 from boto.ec2.keypair import KeyPair
+from boto.ec2.securitygroup import SecurityGroup
 import brkt_cli
 import logging
 import re
@@ -194,6 +195,9 @@ class DummyAWSService(service.BaseAWSService):
 
     def create_security_group(self, name, description):
         return 'sg-%s' % (_new_id(),)
+
+    def get_security_group(self, sg_id):
+        return SecurityGroup(id=sg_id)
 
     def add_security_group_rule(self, sg_id, **kwargs):
         pass
