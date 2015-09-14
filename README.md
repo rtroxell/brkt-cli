@@ -50,8 +50,8 @@ $ export AWS_ACCESS_KEY_ID=<key id>
 
 You'll also need to make sure that your AWS account has the required
 permissions, such as running an instance, describing an image, and
-creating snapshots.  See *iam.json* in the repo root for the complete
-list of required permissions.
+creating snapshots.  See [iam.json](https://github.com/brkt/brkt-cli/blob/master/iam.json)
+for the complete list of required permissions.
 
 ## Encrypting an AMI
 
