@@ -13,11 +13,19 @@ version of 1.0.1+
 
 ## Installation
 
-Use **pip** to install **brkt-cli** directly from the GitHub repo:
+The latest release of **brkt-cli** is version 0.9.  To install this version, run
 
 ```
-$ pip install git+ssh://git@github.int.brkt.net/brkt/brkt-cli.git
+$ pip install git+ssh://git@github.com/brkt/brkt-cli.git@brkt-cli-0.9
 ```
+
+To install the most recent **brkt-cli** code from the tip of master, run
+
+```
+$ pip install git+ssh://git@github.com/brkt/brkt-cli.git
+```
+
+The master branch has the latest features and bug fixes, but is not as thoroughly tested as the official release.
 
 ## Usage
 ```
