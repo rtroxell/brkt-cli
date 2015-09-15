@@ -8,21 +8,30 @@ In order to use the Bracket service, you must be a
 registered Bracket customer.  Email support@brkt.com for
 more information.
 
-**brkt-cli** requires Python 2.7.9+ with a corresponding openssl
-version of 1.0.1+
+**brkt-cli** has the following dependencies:
+* Python 2.7.9+ with a corresponding openssl version of 1.0.1+
+* [boto](https://github.com/boto/boto) 2.38.0+ (Python interface to AWS)
+* [requests](http://www.python-requests.org/en/latest/) 2.7.0+ (Python HTTP library)
 
 ## Installation
 
-The latest release of **brkt-cli** is version 0.9.  To install this version, run
+Use pip to install boto and requests, if they're not already installed:
 
 ```
-$ pip install git+https://git@github.com/brkt/brkt-cli.git@brkt-cli-0.9
+$ pip install boto
+$ pip install requests
 ```
 
-To install the most recent **brkt-cli** code from the tip of master, run
+The latest release of **brkt-cli** is 0.9.  To install this release, run
 
 ```
-$ pip install git+https://git@github.com/brkt/brkt-cli.git
+$ curl -L https://github.com/brkt/brkt-cli/archive/brkt-cli-0.9.tar.gz | tar xzv
+```
+
+This will download the **brkt-cli** source and extract it to a directory called *brkt-cli-brkt-cli-0.9*.  To download the most recent **brkt-cli** code, run
+
+```
+$ curl -L https://github.com/brkt/brkt-cli/archive/master.tar.gz | tar xzv
 ```
 
 The master branch has the latest features and bug fixes, but is not as thoroughly tested as the official release.
@@ -80,10 +89,3 @@ ami-07c2a262
 
 When the process completes, the new AMI id is written to stdout.  All log
 messages are written to stderr.
-
-## Uninstall
-
-Use **pip** to uninstall **brkt-cli**:
-```
-$ pip uninstall brkt-cli
-```
