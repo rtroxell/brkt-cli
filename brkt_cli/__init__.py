@@ -281,7 +281,7 @@ def _get_encryptor_ami(region):
         raise Exception('No API URL found')
     # This suppresses warnings about no `subjectAltName` for cert.
     # TODO: remove when the cert has subjectAltName
-    cert = os.path.join(os.path.dirname(__file__), '../ca_cert.pem')
+    cert = os.path.join(os.path.dirname(__file__), 'assets', 'ca_cert.pem')
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = requests.get("%s/api/v1/encryptor_ami/%s" %
