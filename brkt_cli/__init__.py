@@ -13,38 +13,25 @@
 # limitations under the License.
 
 """
-Create a bracket solo metavisor/guest AMI
-complete with a encrypted root volume for a given guest AMI
+Create an encrypted AMI based on an existing unencrypted AMI.
 
-Basic outline:
-    create a guest AMI with the right permissions on root vol snapshot
-    launch a metavisor AMI with
-        *) unencrypted guest root volume as /dev/sda4
-        *) (raw) guest root volume (2x size) as /dev/sda5
-    wait for the metavisor to launch
-        *) dd from /dev/sda4 to /dev/sda5 creating encrypted root for guest
-    stop metavisor
-    create new AMI from metavisor instance
-        *) include ephemeral drives
+Overview of the process:
+    * Start an instance based on the unencrypted AMI.
+    * Snapshot the root volume of the unencrypted instance.
+    * Terminate the instance.
+    * Start a Bracket Encryptor instance.
+    * Attach the unencrypted root volume to the Encryptor instance.
+    * The Bracket Encryptor copies the unencrypted root volume to a new
+        encrypted volume that's 2x the size of the original.
+    * Snapshot the Bracket Encryptor system volumes and the new encrypted
+        root volume.
+    * Create a new AMI based on the snapshots.
+    * Terminate the Bracket Encryptor instance.
+    * Delete the unencrypted snapshot.
 
-At that point a new AMI contains the metavisor + encrypted guest root volume.
-We should be able to auto-chain load the guest once this AMI is launched
-
-Environment setup:
-Either setup environment variables for:
-export AWS_ACCESS_KEY_ID=XXXXXXX
-export AWS_SECRET_KEY=XXXXXXX
-
-or
-
-export BOTO_CONFIG ~/.ec2/boto_config
-------------
-boto_config
-------------
-[Credentials]
-aws_access_key_id = XXXXXXXXXXXXX
-aws_secret_access_key = XXXXXXXXXXXX
-------------
+Before running brkt encrypt-ami, set the AWS_ACCESS_KEY_ID and
+AWS_SECRET_ACCESS_KEY environment variables, like you would when
+running the AWS command line utility.
 """
 from __future__ import print_function
 
@@ -201,7 +188,7 @@ def _wait_for_encryptor_up(enc_svc, deadline):
     while not deadline.is_expired():
         if enc_svc.is_encryptor_up():
             log.debug(
-                'Encyption service is up after %.1f seconds',
+                'Encryption service is up after %.1f seconds',
                 time.time() - start
             )
             return
@@ -326,9 +313,8 @@ def _wait_for_snapshots(svc, *snapshot_ids):
     log.debug('Waiting for status "completed" for %s', str(snapshot_ids))
     last_progress_log = time.time()
 
-    # Give the AWS some time to propagate the snapshot creation.
-    # If we create and get immediately, AWS may return 400.  We'll fix
-    # this properly for NUC-9311.
+    # Give AWS some time to propagate the snapshot creation.
+    # If we create and get immediately, AWS may return 400.
     _sleep(20)
 
     while True:
@@ -589,8 +575,8 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
         image = aws_svc.get_image(image_id)
         if image is None:
             raise Exception("Can't find image %s" % image_id)
-        avatar_image = aws_svc.get_image(encryptor_ami)
-        if avatar_image is None:
+        encryptor_image = aws_svc.get_image(encryptor_ami)
+        if encryptor_image is None:
             raise Exception("Can't find image %s" % encryptor_ami)
 
         # Register the new AMI.
@@ -609,7 +595,7 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
             ami = aws_svc.register_image(
                 name=name,
                 description=description,
-                kernel_id=avatar_image.kernel_id,
+                kernel_id=encryptor_image.kernel_id,
                 block_device_map=new_bdm
             )
             log.info('Registered AMI %s based on the snapshots.', ami)
@@ -683,7 +669,6 @@ def main():
         metavar='AMI_ID',
         help='The AMI that will be encrypted'
     )
-    # Require the caller to specify the Avatar AMI ID until NUC-9085 is fixed.
     encrypt_ami.add_argument(
         '--encryptor-ami',
         metavar='ID',
