@@ -263,8 +263,8 @@ def _append_suffix(name, suffix, max_length=None):
     if not suffix:
         return name
     if max_length:
-        original_length = max_length - len(suffix)
-        name = name[:original_length]
+        truncated_length = max_length - len(suffix)
+        name = name[:truncated_length]
     return name + suffix
 
 
@@ -587,7 +587,7 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
 
         # Register the new AMI.
         name = _append_suffix(
-            image.name, _get_encrypted_suffix(), 128)
+            image.name, _get_encrypted_suffix(), max_length=128)
         if image.description:
             suffix = SUFFIX_ENCRYPTED_IMAGE % {'image_id': image_id}
             description = _append_suffix(
