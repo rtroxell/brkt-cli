@@ -238,27 +238,24 @@ class TestSnapshotProgress(unittest.TestCase):
 class TestEncryptedImageName(unittest.TestCase):
 
     def test_encrypted_image_suffix(self):
+        """ Test that generated suffixes are unique.
+        """
         s1 = brkt_cli._get_encrypted_suffix()
-        regexp = r'\(encrypted .+\)'
-        m = re.match(regexp, s1)
-        self.assertIsNotNone(m)
-
         s2 = brkt_cli._get_encrypted_suffix()
-        m = re.match(regexp, s2)
-        self.assertIsNotNone(m)
         self.assertNotEqual(s1, s2)
 
-    def test_encrypted_image_name(self):
+    def test_append_suffix(self):
+        """ Test that we append the suffix and truncate the original name.
+        """
         name = 'Boogie nights are always the best in town'
-        suffix = brkt_cli._get_encrypted_suffix()
-        encrypted_name = brkt_cli._get_encrypted_image_name(
-            name, suffix=suffix)
+        suffix = ' (except Tuesday)'
+        encrypted_name = brkt_cli._append_suffix(name, suffix, max_length=128)
         self.assertTrue(encrypted_name.startswith(name))
         self.assertTrue(encrypted_name.endswith(suffix))
 
         # Make sure we truncate the original name when it's too long.
         name += ('X' * 100)
-        encrypted_name = brkt_cli._get_encrypted_image_name(name)
+        encrypted_name = brkt_cli._append_suffix(name, suffix, max_length=128)
         self.assertEqual(128, len(encrypted_name))
         self.assertTrue(encrypted_name.startswith('Boogie nights'))
 
