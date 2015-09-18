@@ -95,10 +95,9 @@ TAG_ENCRYPTOR_AMI = 'BrktEncryptorAMI'
 TAG_DESCRIPTION = 'Description'
 
 NAME_ENCRYPTED_IMAGE = '%(original_image_name)s %(encrypted_suffix)s'
-NAME_ENCRYPTED_IMAGE_SUFFIX = '(encrypted %(nonce)s)'
-DESCRIPTION_ENCRYPTED_IMAGE = (
-    '%(original_image_description)s - based on %(image_id)s, '
-    'encrypted by Bracket Computing'
+NAME_ENCRYPTED_IMAGE_SUFFIX = ' (encrypted %(nonce)s)'
+SUFFIX_ENCRYPTED_IMAGE = (
+    ' - based on %(image_id)s, encrypted by Bracket Computing'
 )
 DEFAULT_DESCRIPTION_ENCRYPTED_IMAGE = \
     'Based on %(image_id)s, encrypted by Bracket Computing'
@@ -252,14 +251,21 @@ def _get_encrypted_suffix():
     The suffix is in the format "(encrypted 787ace7a)".  The nonce portion of
     the suffix is necessary because Amazon requires image names to be unique.
     """
-    nonce = make_nonce()
-    return NAME_ENCRYPTED_IMAGE_SUFFIX % {'nonce': nonce}
+    return NAME_ENCRYPTED_IMAGE_SUFFIX % {'nonce': make_nonce()}
 
 
-def _get_encrypted_image_name(original_name, suffix=None):
-    suffix = ' ' + (suffix or _get_encrypted_suffix())
-    max_length = 128 - len(suffix)
-    return original_name[:max_length] + suffix
+def _append_suffix(name, suffix, max_length=None):
+    """ Append the suffix to the given name.  If the appended length exceeds
+    max_length, truncate the name to make room for the suffix.
+
+    :return: The possibly truncated name with the suffix appended
+    """
+    if not suffix:
+        return name
+    if max_length:
+        truncated_length = max_length - len(suffix)
+        name = name[:truncated_length]
+    return name + suffix
 
 
 def _get_encryptor_ami(region):
@@ -580,12 +586,12 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
             raise Exception("Can't find image %s" % encryptor_ami)
 
         # Register the new AMI.
-        name = _get_encrypted_image_name(image.name)
+        name = _append_suffix(
+            image.name, _get_encrypted_suffix(), max_length=128)
         if image.description:
-            description = DESCRIPTION_ENCRYPTED_IMAGE % {
-                'original_image_description': image.description,
-                'image_id': image_id
-            }
+            suffix = SUFFIX_ENCRYPTED_IMAGE % {'image_id': image_id}
+            description = _append_suffix(
+                image.description, suffix, max_length=255)
         else:
             description = DEFAULT_DESCRIPTION_ENCRYPTED_IMAGE % {
                 'image_id': image_id
