@@ -46,6 +46,7 @@ import datetime
 import requests
 import string
 import sys
+import tempfile
 import time
 import uuid
 import warnings
@@ -206,6 +207,11 @@ def _get_encryption_progress_message(start_time, percent_complete, now=None):
     return msg
 
 
+class EncryptionError(Exception):
+    def __init__(self, message):
+        super(EncryptionError, self).__init__(message)
+
+
 def _wait_for_encryption(enc_svc):
     err_count = 0
     max_errs = 10
@@ -238,12 +244,12 @@ def _wait_for_encryption(enc_svc):
             log.info('Encrypted root drive created.')
             return
         elif state == service.ENCRYPT_FAILED:
-            raise Exception('Encryption failed')
+            raise EncryptionError('Encryption failed')
 
         _sleep(10)
     # We've failed to get encryption status for _max_errs_ consecutive tries.
     # Assume that the server has crashed.
-    raise Exception('Encryption service unavailable')
+    raise EncryptionError('Encryption service unavailable')
 
 
 def _get_encrypted_suffix():
@@ -482,8 +488,24 @@ def create_root_snapshot(aws_svc, ami):
     return ret_values
 
 
+def _write_console_output(aws_svc, instance_id):
+
+    try:
+        console_output = aws_svc.get_console_output(instance_id)
+        if console_output.output:
+            prefix = instance_id + '-'
+            with tempfile.NamedTemporaryFile(
+                    prefix=prefix, suffix='.log', delete=False) as t:
+                t.write(console_output.output)
+            return t.name
+    except:
+        log.exception('Unable to write console output')
+
+    return None
+
+
 def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
-    copy_instance = None
+    encryptor_instance = None
     ami = None
     snapshot_id = None
     sg_id = None
@@ -495,24 +517,45 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
 
         sg_id = create_encryptor_security_group(aws_svc)
 
-        copy_instance = run_copy_instance(
+        encryptor_instance = run_copy_instance(
             aws_svc, encryptor_ami, snapshot_id, size, image_id, sg_id
         )
 
-        host_ip = copy_instance.ip_address
+        host_ip = encryptor_instance.ip_address
         enc_svc = enc_svc_cls(host_ip)
         log.info('Waiting for encryption service on %s at %s',
-                 copy_instance.id, host_ip)
+                 encryptor_instance.id, host_ip)
         _wait_for_encryptor_up(enc_svc, Deadline(600))
         log.info('Creating encrypted root drive.')
-        _wait_for_encryption(enc_svc)
+        try:
+            _wait_for_encryption(enc_svc)
+        except EncryptionError:
+            log.error(
+                'Encryption failed.  Check console output of instance %s '
+                'for details.',
+                encryptor_instance.id
+            )
+            path = _write_console_output(aws_svc, encryptor_instance.id)
+            if path:
+                log.error(
+                    'Wrote console output for instance %s to %s',
+                    encryptor_instance.id,
+                    path
+                )
+            else:
+                log.error(
+                    'Console output for instance %s is not available.',
+                    encryptor_instance.id
+                )
+            raise
+
         log.info('Encrypted root drive is ready.')
 
-        bdm = copy_instance.block_device_mapping
+        bdm = encryptor_instance.block_device_mapping
 
         # Create clean snapshots
-        log.info('Stopping encryptor instance %s', copy_instance.id)
-        aws_svc.stop_instance(copy_instance.id)
+        log.info('Stopping encryptor instance %s', encryptor_instance.id)
+        aws_svc.stop_instance(encryptor_instance.id)
 
         description = DESCRIPTION_SNAPSHOT % {'image_id': image_id}
 
@@ -625,22 +668,33 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
         aws_svc.create_tags(ami)
         log.info('Created encrypted AMI %s based on %s', ami, image_id)
     finally:
-        if copy_instance:
+        if encryptor_instance:
             try:
-                log.info('Terminating encryptor instance %s', copy_instance.id)
-                aws_svc.terminate_instance(copy_instance.id)
+                log.info(
+                    'Terminating encryptor instance %s',
+                    encryptor_instance.id
+                )
+                aws_svc.terminate_instance(encryptor_instance.id)
+                pass
             except Exception as e:
                 log.warn(
-                    'Could not terminate instance %s: %s', copy_instance, e)
+                    'Could not terminate instance %s: %s',
+                    encryptor_instance,
+                    e
+                )
                 # Don't wait for instance later if we couldn't terminate it.
-                copy_instance = None
+                encryptor_instance = None
 
         if sg_id:
             try:
-                log.info('Deleting temporary security group %s', sg_id)
-                if copy_instance:
+                if encryptor_instance:
+                    log.info(
+                        'Waiting for instance %s to terminate.',
+                        encryptor_instance.id
+                    )
                     _wait_for_instance(
-                        aws_svc, copy_instance.id, state='terminated')
+                        aws_svc, encryptor_instance.id, state='terminated')
+                log.info('Deleting temporary security group %s', sg_id)
                 aws_svc.delete_security_group(sg_id)
             except Exception as e:
                 log.warn('Failed deleting security group %s: %s', sg_id, e)
@@ -817,7 +871,6 @@ def main():
             )
         else:
             raise
-
     return 1
 
 if __name__ == '__main__':

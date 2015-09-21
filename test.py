@@ -15,14 +15,13 @@ from boto.ec2.keypair import KeyPair
 from boto.ec2.securitygroup import SecurityGroup
 import brkt_cli
 import logging
-import re
 import time
 import unittest
 import uuid
 
 from boto.ec2.blockdevicemapping import BlockDeviceType, BlockDeviceMapping
 from boto.ec2.image import Image
-from boto.ec2.instance import Instance
+from boto.ec2.instance import Instance, ConsoleOutput
 from boto.ec2.snapshot import Snapshot
 from boto.ec2.volume import Volume
 from brkt_cli import service, util
@@ -210,6 +209,11 @@ class DummyAWSService(service.BaseAWSService):
         kp = KeyPair()
         kp.name = keyname
         return kp
+
+    def get_console_output(self, instance_id):
+        console_output = ConsoleOutput()
+        console_output.output = 'Starting up.\nAll systems go!\n'
+        return console_output
 
 
 class TestSnapshotProgress(unittest.TestCase):
