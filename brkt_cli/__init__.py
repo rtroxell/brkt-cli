@@ -61,7 +61,6 @@ import string
 import sys
 import time
 import uuid
-import warnings
 
 from boto.exception import EC2ResponseError, NoAuthHandlerFound
 from boto.ec2.blockdevicemapping import (
@@ -120,11 +119,9 @@ SLEEP_ENABLED = True
 
 EVENTUAL_CONSISTENCY_TIMEOUT = 10
 
-# Right now this is the STAGE endpoint. We need to make this PROD
-# when we have customers running this. This is superceded by the
-# API_URL environment variable if it exists
-API_URL = \
-    "https://stage-api-lb-1316607304.us-west-2.elb.amazonaws.com"
+# Right now this is the STAGE bucket. We need to make this PROD
+BRACKET_ENVIRONMENT = "stage"
+BRACKET_BUCKET_FMT = "http://solo-brkt-%s-net.s3.amazonaws.com/amis.json"
 
 log = None
 
@@ -276,22 +273,17 @@ def _get_encrypted_image_name(original_name, suffix=None):
 
 
 def _get_encryptor_ami(region):
-    api_url = os.environ.get('API_URL', API_URL)
-    if not api_url:
-        raise Exception('No API URL found')
-    # This suppresses warnings about no `subjectAltName` for cert.
-    # TODO: remove when the cert has subjectAltName
-    cert = os.path.join(os.path.dirname(__file__), '../ca_cert.pem')
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        r = requests.get("%s/api/v1/encryptor_ami/%s" %
-                         (api_url, region),
-                         verify=cert)
+    bracket_env = os.getenv('BRACKET_ENVIRONMENT',
+                            BRACKET_ENVIRONMENT)
+    if not bracket_env:
+        raise Exception('No bracket environment found')
+    bucket_url = BRACKET_BUCKET_FMT % (bracket_env)
+    r = requests.get(bucket_url)
     if r.status_code not in (200, 201):
-        raise Exception('Getting encryptor ami gave response: %s', r.text)
-    ami = r.json()['ami_id']
+        raise Exception('Getting %s gave response: %s', bucket_url, r.text)
+    ami = r.json()[region]
     if not ami:
-        raise Exception('No AMI id returned.')
+        raise Exception('No AMI for %s returned.' % region)
     return ami
 
 

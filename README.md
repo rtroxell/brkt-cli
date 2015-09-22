@@ -9,7 +9,6 @@ registered Bracket customer.  Email support@brkt.com for
 more information.
 
 **brkt-cli** has the following dependencies:
-* Python 2.7.9+ with a corresponding openssl version of 1.0.1+
 * [boto](https://github.com/boto/boto) 2.38.0+ (Python interface to AWS)
 * [requests](http://www.python-requests.org/en/latest/) 2.7.0+ (Python HTTP library)
 
