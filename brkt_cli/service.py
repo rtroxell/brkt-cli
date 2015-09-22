@@ -120,6 +120,10 @@ class BaseAWSService(object):
     def get_key_pair(self, keyname):
         pass
 
+    @abc.abstractmethod
+    def get_console_output(self, instance_id):
+        pass
+
 
 class AWSService(BaseAWSService):
 
@@ -282,6 +286,9 @@ class AWSService(BaseAWSService):
 
     def get_key_pair(self, keyname):
         return self.conn.get_all_key_pairs(keynames=[keyname])[0]
+
+    def get_console_output(self, instance_id):
+        return self.conn.get_console_output(instance_id)
 
 
 class BaseEncryptorService(object):

@@ -28,6 +28,7 @@ setup(
             'brkt = brkt_cli:main',
         ]
     },
-    data_files=[('', ['ca_cert.pem',]),],
+    package_dir={'brkt_cli': 'brkt_cli'},
+    package_data={'brkt_cli': ['assets/ca_cert.pem']},
     test_suite='test'
 )

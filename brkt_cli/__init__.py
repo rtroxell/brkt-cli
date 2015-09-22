@@ -13,38 +13,25 @@
 # limitations under the License.
 
 """
-Create a bracket solo metavisor/guest AMI
-complete with a encrypted root volume for a given guest AMI
+Create an encrypted AMI based on an existing unencrypted AMI.
 
-Basic outline:
-    create a guest AMI with the right permissions on root vol snapshot
-    launch a metavisor AMI with
-        *) unencrypted guest root volume as /dev/sda4
-        *) (raw) guest root volume (2x size) as /dev/sda5
-    wait for the metavisor to launch
-        *) dd from /dev/sda4 to /dev/sda5 creating encrypted root for guest
-    stop metavisor
-    create new AMI from metavisor instance
-        *) include ephemeral drives
+Overview of the process:
+    * Start an instance based on the unencrypted AMI.
+    * Snapshot the root volume of the unencrypted instance.
+    * Terminate the instance.
+    * Start a Bracket Encryptor instance.
+    * Attach the unencrypted root volume to the Encryptor instance.
+    * The Bracket Encryptor copies the unencrypted root volume to a new
+        encrypted volume that's 2x the size of the original.
+    * Snapshot the Bracket Encryptor system volumes and the new encrypted
+        root volume.
+    * Create a new AMI based on the snapshots.
+    * Terminate the Bracket Encryptor instance.
+    * Delete the unencrypted snapshot.
 
-At that point a new AMI contains the metavisor + encrypted guest root volume.
-We should be able to auto-chain load the guest once this AMI is launched
-
-Environment setup:
-Either setup environment variables for:
-export AWS_ACCESS_KEY_ID=XXXXXXX
-export AWS_SECRET_KEY=XXXXXXX
-
-or
-
-export BOTO_CONFIG ~/.ec2/boto_config
-------------
-boto_config
-------------
-[Credentials]
-aws_access_key_id = XXXXXXXXXXXXX
-aws_secret_access_key = XXXXXXXXXXXX
-------------
+Before running brkt encrypt-ami, set the AWS_ACCESS_KEY_ID and
+AWS_SECRET_ACCESS_KEY environment variables, like you would when
+running the AWS command line utility.
 """
 from __future__ import print_function
 
@@ -59,6 +46,7 @@ import datetime
 import requests
 import string
 import sys
+import tempfile
 import time
 import uuid
 
@@ -107,10 +95,9 @@ TAG_ENCRYPTOR_AMI = 'BrktEncryptorAMI'
 TAG_DESCRIPTION = 'Description'
 
 NAME_ENCRYPTED_IMAGE = '%(original_image_name)s %(encrypted_suffix)s'
-NAME_ENCRYPTED_IMAGE_SUFFIX = '(encrypted %(nonce)s)'
-DESCRIPTION_ENCRYPTED_IMAGE = (
-    '%(original_image_description)s - based on %(image_id)s, '
-    'encrypted by Bracket Computing'
+NAME_ENCRYPTED_IMAGE_SUFFIX = ' (encrypted %(nonce)s)'
+SUFFIX_ENCRYPTED_IMAGE = (
+    ' - based on %(image_id)s, encrypted by Bracket Computing'
 )
 DEFAULT_DESCRIPTION_ENCRYPTED_IMAGE = \
     'Based on %(image_id)s, encrypted by Bracket Computing'
@@ -127,8 +114,7 @@ log = None
 
 
 class SnapshotError(Exception):
-    def __init__(self, message):
-        super(SnapshotError, self).__init__(message)
+    pass
 
 
 def _get_snapshot_progress_text(snapshots):
@@ -198,7 +184,7 @@ def _wait_for_encryptor_up(enc_svc, deadline):
     while not deadline.is_expired():
         if enc_svc.is_encryptor_up():
             log.debug(
-                'Encyption service is up after %.1f seconds',
+                'Encryption service is up after %.1f seconds',
                 time.time() - start
             )
             return
@@ -215,6 +201,12 @@ def _get_encryption_progress_message(start_time, percent_complete, now=None):
             ', %s remaining' % datetime.timedelta(seconds=int(remaining))
         )
     return msg
+
+
+class EncryptionError(Exception):
+    def __init__(self, message):
+        super(EncryptionError, self).__init__(message)
+        self.console_output_file = None
 
 
 def _wait_for_encryption(enc_svc):
@@ -249,12 +241,12 @@ def _wait_for_encryption(enc_svc):
             log.info('Encrypted root drive created.')
             return
         elif state == service.ENCRYPT_FAILED:
-            raise Exception('Encryption failed')
+            raise EncryptionError('Encryption failed')
 
         _sleep(10)
     # We've failed to get encryption status for _max_errs_ consecutive tries.
     # Assume that the server has crashed.
-    raise Exception('Encryption service unavailable')
+    raise EncryptionError('Encryption service unavailable')
 
 
 def _get_encrypted_suffix():
@@ -262,14 +254,21 @@ def _get_encrypted_suffix():
     The suffix is in the format "(encrypted 787ace7a)".  The nonce portion of
     the suffix is necessary because Amazon requires image names to be unique.
     """
-    nonce = make_nonce()
-    return NAME_ENCRYPTED_IMAGE_SUFFIX % {'nonce': nonce}
+    return NAME_ENCRYPTED_IMAGE_SUFFIX % {'nonce': make_nonce()}
 
 
-def _get_encrypted_image_name(original_name, suffix=None):
-    suffix = ' ' + (suffix or _get_encrypted_suffix())
-    max_length = 128 - len(suffix)
-    return original_name[:max_length] + suffix
+def _append_suffix(name, suffix, max_length=None):
+    """ Append the suffix to the given name.  If the appended length exceeds
+    max_length, truncate the name to make room for the suffix.
+
+    :return: The possibly truncated name with the suffix appended
+    """
+    if not suffix:
+        return name
+    if max_length:
+        truncated_length = max_length - len(suffix)
+        name = name[:truncated_length]
+    return name + suffix
 
 
 def _get_encryptor_ami(region):
@@ -318,9 +317,8 @@ def _wait_for_snapshots(svc, *snapshot_ids):
     log.debug('Waiting for status "completed" for %s', str(snapshot_ids))
     last_progress_log = time.time()
 
-    # Give the AWS some time to propagate the snapshot creation.
-    # If we create and get immediately, AWS may return 400.  We'll fix
-    # this properly for NUC-9311.
+    # Give AWS some time to propagate the snapshot creation.
+    # If we create and get immediately, AWS may return 400.
     _sleep(20)
 
     while True:
@@ -482,8 +480,24 @@ def create_root_snapshot(aws_svc, ami):
     return ret_values
 
 
+def _write_console_output(aws_svc, instance_id):
+
+    try:
+        console_output = aws_svc.get_console_output(instance_id)
+        if console_output.output:
+            prefix = instance_id + '-'
+            with tempfile.NamedTemporaryFile(
+                    prefix=prefix, suffix='.log', delete=False) as t:
+                t.write(console_output.output)
+            return t
+    except:
+        log.exception('Unable to write console output')
+
+    return None
+
+
 def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
-    copy_instance = None
+    encryptor_instance = None
     ami = None
     snapshot_id = None
     sg_id = None
@@ -495,24 +509,47 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
 
         sg_id = create_encryptor_security_group(aws_svc)
 
-        copy_instance = run_copy_instance(
+        encryptor_instance = run_copy_instance(
             aws_svc, encryptor_ami, snapshot_id, size, image_id, sg_id
         )
 
-        host_ip = copy_instance.ip_address
+        host_ip = encryptor_instance.ip_address
         enc_svc = enc_svc_cls(host_ip)
         log.info('Waiting for encryption service on %s at %s',
-                 copy_instance.id, host_ip)
+                 encryptor_instance.id, host_ip)
         _wait_for_encryptor_up(enc_svc, Deadline(600))
         log.info('Creating encrypted root drive.')
-        _wait_for_encryption(enc_svc)
+        try:
+            _wait_for_encryption(enc_svc)
+        except EncryptionError as e:
+            log.error(
+                'Encryption failed.  Check console output of instance %s '
+                'for details.',
+                encryptor_instance.id
+            )
+
+            e.console_output_file = _write_console_output(
+                aws_svc, encryptor_instance.id)
+            if e.console_output_file:
+                log.error(
+                    'Wrote console output for instance %s to %s',
+                    encryptor_instance.id,
+                    e.console_output_file.name
+                )
+            else:
+                log.error(
+                    'Console output for instance %s is not available.',
+                    encryptor_instance.id
+                )
+            raise e
+
         log.info('Encrypted root drive is ready.')
 
-        bdm = copy_instance.block_device_mapping
+        bdm = encryptor_instance.block_device_mapping
 
         # Create clean snapshots
-        log.info('Stopping encryptor instance %s', copy_instance.id)
-        aws_svc.stop_instance(copy_instance.id)
+        log.info('Stopping encryptor instance %s', encryptor_instance.id)
+        aws_svc.stop_instance(encryptor_instance.id)
 
         description = DESCRIPTION_SNAPSHOT % {'image_id': image_id}
 
@@ -581,17 +618,17 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
         image = aws_svc.get_image(image_id)
         if image is None:
             raise Exception("Can't find image %s" % image_id)
-        avatar_image = aws_svc.get_image(encryptor_ami)
-        if avatar_image is None:
+        encryptor_image = aws_svc.get_image(encryptor_ami)
+        if encryptor_image is None:
             raise Exception("Can't find image %s" % encryptor_ami)
 
         # Register the new AMI.
-        name = _get_encrypted_image_name(image.name)
+        name = _append_suffix(
+            image.name, _get_encrypted_suffix(), max_length=128)
         if image.description:
-            description = DESCRIPTION_ENCRYPTED_IMAGE % {
-                'original_image_description': image.description,
-                'image_id': image_id
-            }
+            suffix = SUFFIX_ENCRYPTED_IMAGE % {'image_id': image_id}
+            description = _append_suffix(
+                image.description, suffix, max_length=255)
         else:
             description = DEFAULT_DESCRIPTION_ENCRYPTED_IMAGE % {
                 'image_id': image_id
@@ -601,7 +638,7 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
             ami = aws_svc.register_image(
                 name=name,
                 description=description,
-                kernel_id=avatar_image.kernel_id,
+                kernel_id=encryptor_image.kernel_id,
                 block_device_map=new_bdm
             )
             log.info('Registered AMI %s based on the snapshots.', ami)
@@ -625,22 +662,33 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
         aws_svc.create_tags(ami)
         log.info('Created encrypted AMI %s based on %s', ami, image_id)
     finally:
-        if copy_instance:
+        if encryptor_instance:
             try:
-                log.info('Terminating encryptor instance %s', copy_instance.id)
-                aws_svc.terminate_instance(copy_instance.id)
+                log.info(
+                    'Terminating encryptor instance %s',
+                    encryptor_instance.id
+                )
+                aws_svc.terminate_instance(encryptor_instance.id)
+                pass
             except Exception as e:
                 log.warn(
-                    'Could not terminate instance %s: %s', copy_instance, e)
+                    'Could not terminate instance %s: %s',
+                    encryptor_instance,
+                    e
+                )
                 # Don't wait for instance later if we couldn't terminate it.
-                copy_instance = None
+                encryptor_instance = None
 
         if sg_id:
             try:
-                log.info('Deleting temporary security group %s', sg_id)
-                if copy_instance:
+                if encryptor_instance:
+                    log.info(
+                        'Waiting for instance %s to terminate.',
+                        encryptor_instance.id
+                    )
                     _wait_for_instance(
-                        aws_svc, copy_instance.id, state='terminated')
+                        aws_svc, encryptor_instance.id, state='terminated')
+                log.info('Deleting temporary security group %s', sg_id)
                 aws_svc.delete_security_group(sg_id)
             except Exception as e:
                 log.warn('Failed deleting security group %s: %s', sg_id, e)
@@ -675,7 +723,6 @@ def main():
         metavar='AMI_ID',
         help='The AMI that will be encrypted'
     )
-    # Require the caller to specify the Avatar AMI ID until NUC-9085 is fixed.
     encrypt_ami.add_argument(
         '--encryptor-ami',
         metavar='ID',
@@ -818,7 +865,6 @@ def main():
             )
         else:
             raise
-
     return 1
 
 if __name__ == '__main__':
