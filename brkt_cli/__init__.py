@@ -121,7 +121,7 @@ EVENTUAL_CONSISTENCY_TIMEOUT = 10
 
 # Right now this is the STAGE bucket. We need to make this PROD
 BRACKET_ENVIRONMENT = "stage"
-BRACKET_BUCKET_FMT = "http://solo-brkt-%s-net.s3.amazonaws.com/amis.json"
+ENCRYPTOR_AMIS_URL = "http://solo-brkt-%s-net.s3.amazonaws.com/amis.json"
 
 log = None
 
@@ -277,11 +277,11 @@ def _get_encryptor_ami(region):
                             BRACKET_ENVIRONMENT)
     if not bracket_env:
         raise Exception('No bracket environment found')
-    bucket_url = BRACKET_BUCKET_FMT % (bracket_env)
+    bucket_url = ENCRYPTOR_AMIS_URL % (bracket_env)
     r = requests.get(bucket_url)
     if r.status_code not in (200, 201):
         raise Exception('Getting %s gave response: %s', bucket_url, r.text)
-    ami = r.json()[region]
+    ami = r.json().get(region)
     if not ami:
         raise Exception('No AMI for %s returned.' % region)
     return ami
