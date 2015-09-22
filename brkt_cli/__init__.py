@@ -117,8 +117,7 @@ log = None
 
 
 class SnapshotError(Exception):
-    def __init__(self, message):
-        super(SnapshotError, self).__init__(message)
+    pass
 
 
 def _get_snapshot_progress_text(snapshots):
@@ -210,6 +209,7 @@ def _get_encryption_progress_message(start_time, percent_complete, now=None):
 class EncryptionError(Exception):
     def __init__(self, message):
         super(EncryptionError, self).__init__(message)
+        self.console_output_file = None
 
 
 def _wait_for_encryption(enc_svc):
@@ -497,7 +497,7 @@ def _write_console_output(aws_svc, instance_id):
             with tempfile.NamedTemporaryFile(
                     prefix=prefix, suffix='.log', delete=False) as t:
                 t.write(console_output.output)
-            return t.name
+            return t
     except:
         log.exception('Unable to write console output')
 
@@ -529,25 +529,27 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
         log.info('Creating encrypted root drive.')
         try:
             _wait_for_encryption(enc_svc)
-        except EncryptionError:
+        except EncryptionError as e:
             log.error(
                 'Encryption failed.  Check console output of instance %s '
                 'for details.',
                 encryptor_instance.id
             )
-            path = _write_console_output(aws_svc, encryptor_instance.id)
-            if path:
+
+            e.console_output_file = _write_console_output(
+                aws_svc, encryptor_instance.id)
+            if e.console_output_file:
                 log.error(
                     'Wrote console output for instance %s to %s',
                     encryptor_instance.id,
-                    path
+                    e.console_output_file.name
                 )
             else:
                 log.error(
                     'Console output for instance %s is not available.',
                     encryptor_instance.id
                 )
-            raise
+            raise e
 
         log.info('Encrypted root drive is ready.')
 

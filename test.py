@@ -15,6 +15,7 @@ from boto.ec2.keypair import KeyPair
 from boto.ec2.securitygroup import SecurityGroup
 import brkt_cli
 import logging
+import os
 import time
 import unittest
 import uuid
@@ -24,13 +25,14 @@ from boto.ec2.image import Image
 from boto.ec2.instance import Instance, ConsoleOutput
 from boto.ec2.snapshot import Snapshot
 from boto.ec2.volume import Volume
-from brkt_cli import service, util
+from brkt_cli import service, util, EncryptionError
 
 brkt_cli.log = logging.getLogger(__name__)
 
 # Uncomment the next line to turn on logging when running unit tests.
 # logging.basicConfig(level=logging.DEBUG)
 
+CONSOLE_OUTPUT_TEXT = 'Starting up.\nAll systems go!\n'
 
 def _new_id():
     return uuid.uuid4().hex[:6]
@@ -212,7 +214,7 @@ class DummyAWSService(service.BaseAWSService):
 
     def get_console_output(self, instance_id):
         console_output = ConsoleOutput()
-        console_output.output = 'Starting up.\nAll systems go!\n'
+        console_output.output = CONSOLE_OUTPUT_TEXT
         return console_output
 
 
@@ -264,28 +266,34 @@ class TestEncryptedImageName(unittest.TestCase):
         self.assertTrue(encrypted_name.startswith('Boogie nights'))
 
 
-class TestSmoke(unittest.TestCase):
+def _build_aws_service():
+    aws_svc = DummyAWSService()
+
+    # Encryptor image
+    bdm = BlockDeviceMapping()
+    for n in (1, 2, 3, 5):
+        device_name = '/dev/sda%d' % n
+        bdm[device_name] = BlockDeviceType()
+    id = aws_svc.register_image(
+        kernel_id=None, name='Encryptor image', block_device_map=bdm)
+    encryptor_image = aws_svc.get_image(id)
+
+    # Guest image
+    bdm = BlockDeviceMapping()
+    bdm['/dev/sda1'] = BlockDeviceType()
+    id = aws_svc.register_image(
+        kernel_id=None, name='Guest image', block_device_map=bdm)
+    guest_image = aws_svc.get_image(id)
+
+    return aws_svc, encryptor_image, guest_image
+
+
+class TestRun(unittest.TestCase):
 
     def test_smoke(self):
-        aws_svc = DummyAWSService()
-
-        # Encryptor image
-        bdm = BlockDeviceMapping()
-        for n in (1, 2, 3, 5):
-            device_name = '/dev/sda%d' % n
-            bdm[device_name] = BlockDeviceType()
-        id = aws_svc.register_image(
-            kernel_id=None, name='Encryptor image', block_device_map=bdm)
-        encryptor_image = aws_svc.get_image(id)
-
-        # Guest image
-        bdm = BlockDeviceMapping()
-        bdm['/dev/sda1'] = BlockDeviceType()
-        id = aws_svc.register_image(
-            kernel_id=None, name='Encryptor image', block_device_map=bdm)
-        guest_image = aws_svc.get_image(id)
-
-        # Run the smoke test.
+        """ Run the entire process and test that nothing obvious is broken.
+        """
+        aws_svc, encryptor_image, guest_image = _build_aws_service()
         brkt_cli.SLEEP_ENABLED = False
         encrypted_ami_id = brkt_cli.run(
             aws_svc=aws_svc,
@@ -295,6 +303,26 @@ class TestSmoke(unittest.TestCase):
         )
         self.assertIsNotNone(encrypted_ami_id)
 
+    def test_encryption_error(self):
+        """ Test that when an encryption failure occurs, we write the
+        console log to a temp file.
+        """
+        aws_svc, encryptor_image, guest_image = _build_aws_service()
+        brkt_cli.SLEEP_ENABLED = False
+        try:
+            brkt_cli.run(
+                aws_svc=aws_svc,
+                enc_svc_cls=FailedEncryptionService,
+                image_id=guest_image.id,
+                encryptor_ami=encryptor_image.id
+            )
+            self.fail('Encryption should have failed')
+        except EncryptionError as e:
+            with open(e.console_output_file.name) as f:
+                content = f.read()
+                self.assertEquals(CONSOLE_OUTPUT_TEXT, content)
+            os.remove(e.console_output_file.name)
+
 
 class ExpiredDeadline(object):
     def is_expired(self):
@@ -302,9 +330,6 @@ class ExpiredDeadline(object):
 
 
 class FailedEncryptionService(service.BaseEncryptorService):
-    def __init__(self):
-        pass
-
     def is_encryptor_up(self):
         return True
 
@@ -323,8 +348,8 @@ class TestEncryptionService(unittest.TestCase):
             brkt_cli._wait_for_encryptor_up(svc, deadline)
 
     def test_encryption_fails(self):
-        svc = FailedEncryptionService()
-        with self.assertRaisesRegexp(Exception, 'Encryption failed'):
+        svc = FailedEncryptionService('192.168.1.1')
+        with self.assertRaisesRegexp(EncryptionError, 'Encryption failed'):
             brkt_cli._wait_for_encryption(svc)
 
 
