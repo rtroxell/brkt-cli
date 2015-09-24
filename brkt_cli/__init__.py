@@ -575,7 +575,10 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
                 )
             else:
                 log.error(
-                    'Console output for instance %s is not available.',
+                    'Encryptor console output is not currently available.  '
+                    'Wait a minute and check the console output for '
+                    'instance %s in the EC2 Management '
+                    'Console.',
                     encryptor_instance.id
                 )
             raise e
