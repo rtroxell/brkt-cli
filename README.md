@@ -21,13 +21,13 @@ $ pip install boto
 $ pip install requests
 ```
 
-The latest release of **brkt-cli** is 0.9.  To install this release, run
+The latest release of **brkt-cli** is 0.9.1.  To install this release, run
 
 ```
-$ curl -L https://github.com/brkt/brkt-cli/archive/brkt-cli-0.9.tar.gz | tar xzv
+$ curl -L https://github.com/brkt/brkt-cli/archive/brkt-cli-0.9.1.tar.gz | tar xzv
 ```
 
-This will download the **brkt-cli** source and extract it to a directory called *brkt-cli-brkt-cli-0.9*.  To download the most recent **brkt-cli** code, run
+This will download the **brkt-cli** source and extract it to a directory called *brkt-cli-brkt-cli-0.9.1*.  To download the most recent **brkt-cli** code, run
 
 ```
 $ curl -L https://github.com/brkt/brkt-cli/archive/master.tar.gz | tar xzv
