@@ -78,6 +78,7 @@ class DummyAWSService(service.BaseAWSService):
         self.transition_to_running = {}
         self.transition_to_completed = {}
         self.images = {}
+        self.console_output_text = CONSOLE_OUTPUT_TEXT
         self.tagged_volumes = []
 
     def run_instance(self,
@@ -223,7 +224,7 @@ class DummyAWSService(service.BaseAWSService):
 
     def get_console_output(self, instance_id):
         console_output = ConsoleOutput()
-        console_output.output = CONSOLE_OUTPUT_TEXT
+        console_output.output = self.console_output_text
         return console_output
 
 
@@ -312,7 +313,7 @@ class TestRun(unittest.TestCase):
         )
         self.assertIsNotNone(encrypted_ami_id)
 
-    def test_encryption_error(self):
+    def test_encryption_error_console_output_available(self):
         """ Test that when an encryption failure occurs, we write the
         console log to a temp file.
         """
@@ -331,6 +332,25 @@ class TestRun(unittest.TestCase):
                 content = f.read()
                 self.assertEquals(CONSOLE_OUTPUT_TEXT, content)
             os.remove(e.console_output_file.name)
+
+    def test_encryption_error_console_output_not_available(self):
+        """ Test that we handle the case when encryption fails and console
+        output is not available.
+        """
+        aws_svc, encryptor_image, guest_image = _build_aws_service()
+        brkt_cli.SLEEP_ENABLED = False
+        aws_svc.console_output_text = None
+
+        try:
+            brkt_cli.run(
+                aws_svc=aws_svc,
+                enc_svc_cls=FailedEncryptionService,
+                image_id=guest_image.id,
+                encryptor_ami=encryptor_image.id
+            )
+            self.fail('Encryption should have failed')
+        except EncryptionError as e:
+            self.assertIsNone(e.console_output_file)
 
     def test_delete_orphaned_volumes(self):
         """ Test that we clean up instance volumes that are orphaned by AWS.
