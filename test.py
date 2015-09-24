@@ -34,6 +34,7 @@ brkt_cli.log = logging.getLogger(__name__)
 
 CONSOLE_OUTPUT_TEXT = 'Starting up.\nAll systems go!\n'
 
+
 def _new_id():
     return uuid.uuid4().hex[:6]
 
@@ -70,12 +71,14 @@ class DummyEncryptorService(service.BaseEncryptorService):
 class DummyAWSService(service.BaseAWSService):
 
     def __init__(self):
+        super(DummyAWSService, self).__init__(_new_id())
         self.instances = {}
         self.volumes = {}
         self.snapshots = {}
         self.transition_to_running = {}
         self.transition_to_completed = {}
         self.images = {}
+        self.tagged_volumes = []
 
     def run_instance(self,
                      image_id,
@@ -137,7 +140,13 @@ class DummyAWSService(service.BaseAWSService):
         return instance
 
     def get_volume(self, volume_id):
-        return self.volumes[volume_id]
+        return self.volumes.get(volume_id)
+
+    def get_volumes(self, tag_key=None, tag_value=None):
+        if tag_key and tag_value:
+            return self.tagged_volumes
+        else:
+            return []
 
     def get_snapshots(self, *snapshot_ids):
         return [self.get_snapshot(id) for id in snapshot_ids]
@@ -322,6 +331,36 @@ class TestRun(unittest.TestCase):
                 content = f.read()
                 self.assertEquals(CONSOLE_OUTPUT_TEXT, content)
             os.remove(e.console_output_file.name)
+
+    def test_delete_orphaned_volumes(self):
+        """ Test that we clean up instance volumes that are orphaned by AWS.
+        """
+        aws_svc, encryptor_image, guest_image = _build_aws_service()
+        brkt_cli.SLEEP_ENABLED = False
+
+        # Simulate a tagged orphaned volume.
+        volume = Volume()
+        volume.id = _new_id()
+        aws_svc.volumes[volume.id] = volume
+        aws_svc.tagged_volumes.append(volume)
+
+        # Verify that lookup succeeds before run().
+        self.assertEqual(volume, aws_svc.get_volume(volume.id))
+        self.assertEqual(
+            [volume],
+            aws_svc.get_volumes(
+                tag_key=brkt_cli.TAG_ENCRYPTOR_SESSION_ID, tag_value='123')
+        )
+
+        brkt_cli.run(
+            aws_svc=aws_svc,
+            enc_svc_cls=DummyEncryptorService,
+            image_id=guest_image.id,
+            encryptor_ami=encryptor_image.id
+        )
+
+        # Verify that the volume was deleted.
+        self.assertIsNone(aws_svc.get_volume(volume.id))
 
 
 class ExpiredDeadline(object):

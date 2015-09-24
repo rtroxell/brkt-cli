@@ -48,7 +48,6 @@ import string
 import sys
 import tempfile
 import time
-import uuid
 
 from boto.exception import EC2ResponseError, NoAuthHandlerFound
 from boto.ec2.blockdevicemapping import (
@@ -78,7 +77,7 @@ NAME_ENCRYPTOR = 'Bracket volume encryptor'
 DESCRIPTION_ENCRYPTOR = \
     'Copies the root snapshot from %(image_id)s to a new encrypted volume'
 
-# Snapshots names.
+# Snapshot names.
 NAME_ORIGINAL_SNAPSHOT = 'Bracket encryptor original volume'
 DESCRIPTION_ORIGINAL_SNAPSHOT = \
     'Original unencrypted root volume from %(image_id)s'
@@ -87,6 +86,13 @@ NAME_METAVISOR_ROOT_SNAPSHOT = 'Bracket system root'
 NAME_METAVISOR_GRUB_SNAPSHOT = 'Bracket system GRUB'
 NAME_METAVISOR_LOG_SNAPSHOT = 'Bracket system log'
 DESCRIPTION_SNAPSHOT = 'Based on %(image_id)s'
+
+# Volume names.
+NAME_ORIGINAL_VOLUME = 'Original unencrypted root volume from %(image_id)s'
+NAME_ENCRYPTED_ROOT_VOLUME = 'Bracket encrypted root volume'
+NAME_METAVISOR_ROOT_VOLUME = 'Bracket system root'
+NAME_METAVISOR_GRUB_VOLUME = 'Bracket system GRUB'
+NAME_METAVISOR_LOG_VOLUME = 'Bracket system log'
 
 # Tag names.
 TAG_ENCRYPTOR = 'BrktEncryptor'
@@ -390,7 +396,7 @@ def create_encryptor_security_group(svc):
     return sg_id
 
 
-def run_copy_instance(aws_svc, encryptor_image_id, snapshot, root_size,
+def _run_encryptor_instance(aws_svc, encryptor_image_id, snapshot, root_size,
                       guest_image_id, sg_id):
     log.info('Launching encryptor instance with snapshot %s', snapshot)
 
@@ -414,6 +420,7 @@ def run_copy_instance(aws_svc, encryptor_image_id, snapshot, root_size,
                                     security_group_ids=[sg_id],
                                     block_device_map=bdm)
     _safe_get_instance(aws_svc, instance.id)
+
     aws_svc.create_tags(
         instance.id,
         name=NAME_ENCRYPTOR,
@@ -421,27 +428,40 @@ def run_copy_instance(aws_svc, encryptor_image_id, snapshot, root_size,
     )
     instance = _wait_for_instance(aws_svc, instance.id)
     log.info('Launched encryptor instance %s', instance.id)
+
+    # Tag volumes.
+    bdm = instance.block_device_mapping
+    aws_svc.create_tags(
+        bdm['/dev/sda5'].volume_id, name=NAME_ENCRYPTED_ROOT_VOLUME)
+    aws_svc.create_tags(
+        bdm['/dev/sda2'].volume_id, name=NAME_METAVISOR_ROOT_VOLUME)
+    aws_svc.create_tags(
+        bdm['/dev/sda1'].volume_id, name=NAME_METAVISOR_GRUB_VOLUME)
+    aws_svc.create_tags(
+        bdm['/dev/sda3'].volume_id, name=NAME_METAVISOR_LOG_VOLUME)
+
     return instance
 
 
-def create_root_snapshot(aws_svc, ami):
-    """ Launch the snapshotter instance, snapshot the root volume of the given
-    AMI, and shut down the instance.
-
-    :except SnapshotError if the snapshot goes into an error state
-    """
-    instance = aws_svc.run_instance(ami)
+def _run_snapshotter_instance(aws_svc, image_id):
+    instance = aws_svc.run_instance(image_id)
     log.info(
         'Launching instance %s to snapshot root disk for %s',
-        instance.id, ami)
+        instance.id, image_id)
     _safe_get_instance(aws_svc, instance.id)
     aws_svc.create_tags(
         instance.id,
         name=NAME_SNAPSHOT_CREATOR,
-        description=DESCRIPTION_SNAPSHOT_CREATOR % {'image_id': ami}
+        description=DESCRIPTION_SNAPSHOT_CREATOR % {'image_id': image_id}
     )
-    instance = _wait_for_instance(aws_svc, instance.id)
+    return _wait_for_instance(aws_svc, instance.id)
 
+
+def _snapshot_root_volume(aws_svc, instance, image_id):
+    """ Snapshot the root volume of the given AMI.
+
+    :except SnapshotError if the snapshot goes into an error state
+    """
     log.info(
         'Stopping instance %s in order to create snapshot', instance.id)
     aws_svc.stop_instance(instance.id)
@@ -456,23 +476,21 @@ def create_root_snapshot(aws_svc, ami):
         root_dev = string.rstrip(root_dev, string.digits)
     root_vol = bdm[root_dev]
     vol = aws_svc.get_volume(root_vol.volume_id)
+    aws_svc.create_tags(
+        root_vol.volume_id,
+        name=NAME_ORIGINAL_VOLUME % {'image_id': image_id}
+    )
+
     snapshot = aws_svc.create_snapshot(
         vol.id,
         name=NAME_ORIGINAL_SNAPSHOT,
-        description=DESCRIPTION_ORIGINAL_SNAPSHOT % {'image_id': ami}
+        description=DESCRIPTION_ORIGINAL_SNAPSHOT % {'image_id': image_id}
     )
     log.info(
         'Creating snapshot %s of root volume for instance %s',
         snapshot.id, instance.id
     )
     _wait_for_snapshots(aws_svc, snapshot.id)
-
-    # Terminate snapshotter instance.
-    log.info(
-        'Created snapshot %s.  Terminating instance %s',
-        snapshot.id, instance.id
-    )
-    aws_svc.terminate_instance(instance.id)
 
     ret_values = (
         snapshot.id, root_dev, vol.size, root_vol.volume_type, root_vol.iops)
@@ -496,20 +514,39 @@ def _write_console_output(aws_svc, instance_id):
     return None
 
 
+def _terminate_instance(aws_svc, id, name, terminated_instance_ids):
+    try:
+        log.info('Terminating %s instance %s', name, id)
+        aws_svc.terminate_instance(id)
+        terminated_instance_ids.add(id)
+    except Exception as e:
+        log.warn('Could not terminate %s instance: %s', name, e)
+
+
 def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
     encryptor_instance = None
     ami = None
     snapshot_id = None
     sg_id = None
+    snapshotter_instance = None
+    terminated_instance_ids = set()
 
     try:
-        snapshot_id, root_dev, size, vol_type, iops = create_root_snapshot(
-            aws_svc, image_id
+        snapshotter_instance = _run_snapshotter_instance(aws_svc, image_id)
+        snapshot_id, root_dev, size, vol_type, iops = _snapshot_root_volume(
+            aws_svc, snapshotter_instance, image_id
         )
+        _terminate_instance(
+            aws_svc,
+            id=snapshotter_instance.id,
+            name='snapshotter',
+            terminated_instance_ids=terminated_instance_ids
+        )
+        snapshotter_instance = None
 
         sg_id = create_encryptor_security_group(aws_svc)
 
-        encryptor_instance = run_copy_instance(
+        encryptor_instance = _run_encryptor_instance(
             aws_svc, encryptor_ami, snapshot_id, size, image_id, sg_id
         )
 
@@ -581,6 +618,14 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
 
         _wait_for_snapshots(
             aws_svc, snap_guest.id, snap_bsd.id, snap_grub.id, snap_log.id)
+
+        _terminate_instance(
+            aws_svc,
+            id=encryptor_instance.id,
+            name='encryptor',
+            terminated_instance_ids=terminated_instance_ids
+        )
+        encryptor_instance = None
 
         # Set up new Block Device Mappings
         log.debug('Creating block device mapping')
@@ -662,32 +707,44 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
         aws_svc.create_tags(ami)
         log.info('Created encrypted AMI %s based on %s', ami, image_id)
     finally:
+        if snapshotter_instance:
+            _terminate_instance(
+                aws_svc,
+                id=snapshotter_instance.id,
+                name='snapshotter',
+                terminated_instance_ids=terminated_instance_ids
+            )
         if encryptor_instance:
+            _terminate_instance(
+                aws_svc,
+                id=encryptor_instance.id,
+                name='encryptor',
+                terminated_instance_ids=terminated_instance_ids
+            )
+        if terminated_instance_ids:
+            log.info('Waiting for instances to terminate.')
             try:
-                log.info(
-                    'Terminating encryptor instance %s',
-                    encryptor_instance.id
-                )
-                aws_svc.terminate_instance(encryptor_instance.id)
-                pass
+                for id in terminated_instance_ids:
+                    _wait_for_instance(aws_svc, id, state='terminated')
             except Exception as e:
                 log.warn(
-                    'Could not terminate instance %s: %s',
-                    encryptor_instance,
-                    e
-                )
-                # Don't wait for instance later if we couldn't terminate it.
-                encryptor_instance = None
+                    'An error occurred while waiting for instances to '
+                    'terminate: %s', e)
+
+        # Delete any volumes that were unexpectedly orphaned by AWS.
+        try:
+            volumes = aws_svc.get_volumes(
+                tag_key=TAG_ENCRYPTOR_SESSION_ID,
+                tag_value=aws_svc.session_id
+            )
+            for volume in volumes:
+                log.info('Deleting orphaned volume %s', volume.id)
+                aws_svc.delete_volume(volume.id)
+        except Exception as e:
+            log.warn('Unable to delete volume: %s', e)
 
         if sg_id:
             try:
-                if encryptor_instance:
-                    log.info(
-                        'Waiting for instance %s to terminate.',
-                        encryptor_instance.id
-                    )
-                    _wait_for_instance(
-                        aws_svc, encryptor_instance.id, state='terminated')
                 log.info('Deleting temporary security group %s', sg_id)
                 aws_svc.delete_security_group(sg_id)
             except Exception as e:
@@ -794,7 +851,7 @@ def main():
             log.exception('Failed to get encryptor AMI.')
             return 1
 
-    session_id = uuid.uuid4().hex
+    session_id = util.make_nonce()
     default_tags = {
         TAG_ENCRYPTOR: True,
         TAG_ENCRYPTOR_SESSION_ID: session_id,
