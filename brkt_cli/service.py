@@ -32,6 +32,9 @@ log = logging.getLogger(__name__)
 class BaseAWSService(object):
     __metaclass__ = abc.ABCMeta
 
+    def __init__(self, session_id):
+        self.session_id = session_id
+
     @abc.abstractmethod
     def run_instance(self,
                      image_id,
@@ -58,6 +61,10 @@ class BaseAWSService(object):
 
     @abc.abstractmethod
     def get_volume(self, volume_id):
+        pass
+
+    @abc.abstractmethod
+    def get_volumes(self, tag_key=None, tag_value=None):
         pass
 
     @abc.abstractmethod
@@ -132,7 +139,8 @@ class AWSService(BaseAWSService):
             encryptor_session_id,
             encryptor_ami,
             default_tags=None):
-        self.session_id = encryptor_session_id
+        super(AWSService, self).__init__(encryptor_session_id)
+
         self.encryptor_ami = encryptor_ami
         self.default_tags = default_tags or {}
 
@@ -192,6 +200,13 @@ class AWSService(BaseAWSService):
     def get_volume(self, volume_id):
         return self.conn.get_all_volumes(volume_ids=[volume_id])[0]
 
+    def get_volumes(self, tag_key=None, tag_value=None):
+        filters = {}
+        if tag_key and tag_value:
+            filters['tag:%s' % tag_key] = tag_value
+
+        return self.conn.get_all_volumes(filters=filters)
+
     def get_snapshots(self, *snapshot_ids):
         return self.conn.get_all_snapshots(snapshot_ids)
 
@@ -199,11 +214,13 @@ class AWSService(BaseAWSService):
         return self.conn.get_all_snapshots([snapshot_id])[0]
 
     def create_snapshot(self, volume_id, name=None, description=None):
+        log.debug('Creating snapshot of %s', volume_id)
         snapshot = self.conn.create_snapshot(volume_id, description)
         self.create_tags(snapshot.id, name=name)
         return snapshot
 
     def delete_volume(self, volume_id):
+        log.debug('Deleting volume %s', volume_id)
         return self.conn.delete_volume(volume_id)
 
     def validate_guest_ami(self, ami_id):
