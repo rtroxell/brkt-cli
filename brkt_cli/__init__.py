@@ -112,6 +112,8 @@ SLEEP_ENABLED = True
 
 EVENTUAL_CONSISTENCY_TIMEOUT = 10
 
+GET_CONSOLE_TIMEOUT = 5 * 60
+
 # Right now this is the STAGE bucket. We need to make this PROD
 BRACKET_ENVIRONMENT = "stage"
 ENCRYPTOR_AMIS_URL = "http://solo-brkt-%s-net.s3.amazonaws.com/amis.json"
@@ -498,19 +500,22 @@ def _snapshot_root_volume(aws_svc, instance, image_id):
     return ret_values
 
 
-def _write_console_output(aws_svc, instance_id):
-
-    try:
-        console_output = aws_svc.get_console_output(instance_id)
-        if console_output.output:
-            prefix = instance_id + '-'
-            with tempfile.NamedTemporaryFile(
-                    prefix=prefix, suffix='.log', delete=False) as t:
-                t.write(console_output.output)
-            return t
-    except:
-        log.exception('Unable to write console output')
-
+def _write_console_output(aws_svc, instance_id, timeout=GET_CONSOLE_TIMEOUT):
+    deadline = Deadline(timeout)
+    while not deadline.is_expired():
+        try:
+            console_output = aws_svc.get_console_output(instance_id)
+            if console_output.output:
+                prefix = instance_id + '-'
+                with tempfile.NamedTemporaryFile(
+                        prefix=prefix, suffix='.log', delete=False) as t:
+                    t.write(console_output.output)
+                return t
+        except:
+            pass
+        log.info('Waiting on console output from %s' % instance_id)
+        _sleep(5)
+    log.warn('Timed out waiting for console output from %s' % instance_id)
     return None
 
 
@@ -560,7 +565,7 @@ def run(aws_svc, enc_svc_cls, image_id, encryptor_ami):
             _wait_for_encryption(enc_svc)
         except EncryptionError as e:
             log.error(
-                'Encryption failed.  Check console output of instance %s '
+                'Encryption failed.  Fetching console output of instance %s '
                 'for details.',
                 encryptor_instance.id
             )
